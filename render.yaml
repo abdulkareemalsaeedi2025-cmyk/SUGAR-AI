@@ -6,7 +6,7 @@ services:
   - type: web
     name: smart-sugar-ai
     runtime: node
-    plan: starter            # free plan sleeps after 15 min idle — starter stays warm for the TV
+    plan: free               # stays awake via the cron ping (see DEPLOY.md §4); upgrade to starter to skip that
     buildCommand: npm ci && npm run build
     startCommand: node node_modules/next/dist/bin/next start -p $PORT
     healthCheckPath: /api/health
