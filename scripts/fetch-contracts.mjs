@@ -20,6 +20,18 @@ import path from 'node:path';
 import { createRequire } from 'node:module';
 
 const ROOT = process.cwd();
+
+// Minimal .env loader (no dependency) — needed for DATABASE_URL cloud push.
+try {
+  const envFile = fs.readFileSync(path.join(ROOT, '.env'), 'utf8');
+  for (const line of envFile.split(/\r?\n/)) {
+    const m = line.match(/^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)\s*$/);
+    if (!m) continue;
+    const [, k, v] = m;
+    if (process.env[k] === undefined) process.env[k] = v.replace(/^["']|["']$/g, '');
+  }
+} catch { /* .env optional */ }
+
 const OUT_DIR = path.join(ROOT, 'data');
 const OUT_FILE = path.join(OUT_DIR, 'contracts.json');
 
@@ -40,7 +52,6 @@ const PW_CANDIDATES = [
 ].filter(Boolean);
 
 const TARGETS = [
-  { symbol: 'SBY00', stooq: 'sb.f', label: 'Cash', role: 'cash' },
   { symbol: 'SBH27', stooq: 'sbh27.f', label: 'Mar 2027', role: 'forward' },
   { symbol: 'SBK27', stooq: 'sbk27.f', label: 'May 2027', role: 'forward' },
 ];
@@ -223,6 +234,25 @@ async function main() {
   fs.writeFileSync(tmp, JSON.stringify(payload, null, 2));
   fs.renameSync(tmp, OUT_FILE);
   console.log(`[contracts] wrote ${path.relative(ROOT, OUT_FILE)} (${contracts.length}/${TARGETS.length} symbols)`);
+
+  // Cloud push: when DATABASE_URL is configured (.env), also write the snapshot
+  // straight into the Supabase kv store so the Render deployment serves it.
+  // Stooq's proof-of-work blocks datacenter IPs, so the cloud app can never
+  // fetch this itself — the owner's machine pushes it (daily, scheduled).
+  const dbUrl = process.env.DATABASE_URL || process.env.SUPABASE_DB_URL;
+  if (dbUrl) {
+    try {
+      const { default: postgres } = await import('postgres');
+      const sql = postgres(dbUrl, { ssl: 'require', max: 1, connect_timeout: 20 });
+      await sql`
+        INSERT INTO kv (key, value, "updatedAt") VALUES ('contracts-snapshot', ${JSON.stringify(payload)}, now())
+        ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, "updatedAt" = now()`;
+      await sql.end();
+      console.log('[contracts] pushed snapshot to cloud DB (kv: contracts-snapshot)');
+    } catch (e) {
+      console.warn(`[contracts] cloud push failed (local file is fine): ${String(e?.message ?? e).slice(0, 120)}`);
+    }
+  }
 }
 
 main().catch((e) => {

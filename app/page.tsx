@@ -1,40 +1,215 @@
 'use client';
-import {useEffect,useMemo,useState} from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import CashChart from './components/CashChart';
 import NearContractCard from './components/NearContractCard';
+import NextContractCard from './components/NextContractCard';
+import LondonSugarCard from './components/LondonSugarCard';
+import InventoryHub from './components/InventoryHub';
+import VesselTracker from './components/VesselTracker';
+import RecommendationCard from './components/RecommendationCard';
 import DriversPanel from './components/DriversPanel';
+import ReportsDaily from './components/ReportsDaily';
+import RefinedPrices from './components/RefinedPrices';
+import ChatAssistant from './components/ChatAssistant';
+import NewsTicker, { type TickerItem } from './components/NewsTicker';
+import ExecutiveSnapshot from './components/ExecutiveSnapshot';
+import { ContractProvider, useContract } from './components/ContractContext';
+import { LangProvider, useLang } from './components/LangContext';
+import { AuthProvider } from './components/AuthContext';
+import UserBadge from './components/UserBadge';
+// NOTE: PricingLedger (manual lots) hidden for now — may be re-enabled later.
+// Vessel pricing (report-fed) lives on in VesselPricingTable.
+import VesselPricingTable from './components/VesselPricingTable';
+import type { LondonData, LondonFeed } from './components/LondonSugarCard';
 
-type Contract={symbol:string;name:string;label:string;role:'cash'|'forward';available:boolean;last:number|null;open:number|null;high:number|null;low:number|null;prevClose:number|null;change:number|null;changePct:number|null;mode:string;source:string;sourceUrl:string;note:string|null};
-type Market={updatedAt:string;source:string;mode:string;providers:{barchart:boolean;stooq?:boolean;yahoo:boolean};note:string|null;snapshotFetchedAt?:string|null;contracts:Contract[];spreads:{from:string;to:string;value:number|null;pct:number|null}[];coverage:{total:number;priced:number}};
-const A={ar:{title:'مركز ذكاء المشتريات الخارجية',sub:'لوحة موحدة لاتخاذ القرار — الأسواق، المخزون، الطقس واللوجستيات',market:'مراقبة أسواق السكر',raw:'سكر خام No.11',contracts:'العقود الثلاثة',cash:'الكاش',last:'آخر سعر',open:'الفتح',high:'الأعلى',low:'الأدنى',spread:'الفارق Spread',drivers:'العوامل المؤثرة',inventory:'مركز المخزون',logistics:'السفن واللوجستيات',inventoryTotal:'إجمالي المخزون',priced:'مسعّر',unpriced:'غير مسعّر',status:'حالة المصدر',refresh:'تحديث الآن',auto:'تحديث تلقائي',weather:'الطقس — سانتوس',vessel:'تتبع السفن',notConnected:'غير متصل بعد',connected:'متصل',source:'المصدر',arabic:'العربية',english:'English',unit:'US¢/lb',updated:'آخر تحديث',noData:'لا توجد بيانات متاحة',rawUnit:'سنت/رطل',liveChart:'مؤشر سعر الكاش — لحظي',awaitKey:'بانتظار المفتاح',keyNeeded:'شغّل npm run fetch:contracts لتحديث اللقطة',pricedOf:'مسعّر / الإجمالي',live:'لحظي',delayedMode:'مؤجل'},en:{title:'External Procurement Intelligence',sub:'Single decision dashboard — markets, inventory, weather and logistics',market:'Sugar Market Watch',raw:'Raw Sugar No.11',contracts:'Three contracts',cash:'Cash',last:'Last',open:'Open',high:'High',low:'Low',spread:'Spread',drivers:'Market Drivers',inventory:'Inventory Hub',logistics:'Vessel & Port Logistics',inventoryTotal:'Total inventory',priced:'Priced',unpriced:'Unpriced',status:'Source status',refresh:'Refresh now',auto:'Auto refresh',weather:'Weather — Santos',vessel:'Vessel tracking',notConnected:'Not connected yet',connected:'Connected',source:'Source',arabic:'العربية',english:'English',unit:'US¢/lb',updated:'Last update',noData:'No data available',rawUnit:'US¢/lb',liveChart:'Cash price indicator — live',awaitKey:'Awaiting key',keyNeeded:'Run npm run fetch:contracts to refresh the snapshot',pricedOf:'Priced / total',live:'Live',delayedMode:'Delayed'}};
-function fmt(v:number|null,d=2){return v==null?'—':v.toFixed(d)}
-const skeleton=(symbol:string,label:string,role:'cash'|'forward'):Contract=>({symbol,name:label,label,role,available:false,last:null,open:null,high:null,low:null,prevClose:null,change:null,changePct:null,mode:'loading',source:'',sourceUrl:'https://www.barchart.com/futures/quotes/SB*0/futures-prices?viewName=main',note:role==='cash'?null:'Requires BARCHART_API_KEY — individual ICE Sugar forwards are not on any free feed.'});
-const SKELETON:Contract[]=[skeleton('SBY00','Cash','cash'),skeleton('SBH27','Mar 2027','forward'),skeleton('SBK27','May 2027','forward')];
-export default function Page(){
- const [lang,setLang]=useState<'ar'|'en'>('ar'); const t=A[lang]; const [market,setMarket]=useState<Market|null>(null); const [vessel,setVessel]=useState<any>(null); const [weather,setWeather]=useState<any>(null); const [loading,setLoading]=useState(true); const [last,setLast]=useState('');
- const load=async()=>{setLoading(true);try{
-    // allSettled: one failing endpoint (weather/vessels) must never freeze the whole clock.
-    const [m,w,v]=await Promise.allSettled([
-      fetch('/api/market',{cache:'no-store'}).then(r=>r.json()),
-      fetch('/api/weather',{cache:'no-store'}).then(r=>r.json()),
-      fetch('/api/vessels',{cache:'no-store'}).then(r=>r.json()),
-    ]);
-    if(m.status==='fulfilled')setMarket(m.value);
-    if(w.status==='fulfilled')setWeather(w.value);
-    if(v.status==='fulfilled')setVessel(v.value);
-    setLast(new Date().toLocaleTimeString(lang==='ar'?'ar-YE':'en-US'));
-  }finally{setLoading(false)}};
- useEffect(()=>{load();const id=setInterval(load,60000);return()=>clearInterval(id)},[lang]);
- const priced=70, unpriced=30;
-  const cards=useMemo(()=>market?.contracts?.length===3?market.contracts:SKELETON,[market]);
- const dir=lang==='ar'?'rtl':'ltr';
- return <main dir={dir} className="shell"><header className="top"><div><div className="eyebrow">PROCUREMENT INTELLIGENCE • 3003</div><h1>{t.title}</h1><p>{t.sub}</p></div><div className="actions"><button onClick={()=>setLang('ar')} className={lang==='ar'?'active':''}>{t.arabic}</button><button onClick={()=>setLang('en')} className={lang==='en'?'active':''}>{t.english}</button><button onClick={load}>{t.refresh}</button></div></header>
- <section className="statusbar"><span className="dot"/> {t.auto}: 60s <span>•</span> {t.updated}: {last||'—'} <span>•</span> {t.source}: {market?.source||'—'}</section>
- <NearContractCard/>
- <CashChart/>
- <article className="card market"><div className="cardhead"><div><span className="kicker">ICE / SUGAR #11</span><h2>{t.raw}</h2></div><a href="https://www.barchart.com/futures/quotes/SB*0/futures-prices?viewName=main" target="_blank" rel="noreferrer noopener">Barchart ↗</a></div><div className="contracts">{cards.map((c)=><div className={`contract${c.available?'':' locked'}`} key={c.symbol}><div className="ctop"><strong>{c.role==='cash'?`${t.cash}${c.name?` · ${c.name}`:''}`:c.label}</strong><span className={`pill${c.available?'':' pillo'}`}>{c.mode==='loading'?'…':!c.available?t.awaitKey:c.mode==='i'?t.live:c.mode==='delayed'?t.delayedMode:'Data'}</span></div><div className="price">{fmt(c.last)} <small>{t.unit}</small></div>{c.available?<div className="ohlc"><span>{t.open}<b>{fmt(c.open)}</b></span><span>{t.high}<b>{fmt(c.high)}</b></span><span>{t.low}<b>{fmt(c.low)}</b></span><span>Δ<b className={(c.change??0)>=0?'up':'down'}>{fmt(c.change)}</b></span></div>:<div className="needkey">{c.mode==='loading'?t.noData:t.keyNeeded}</div>}</div>)}</div>{(market?.spreads||[]).map((s,i)=><div className="spread" key={i}><span>{market?.contracts[i]?.role==='cash'?t.cash:market?.contracts[i]?.label} → {market?.contracts[i+1]?.label}</span><b className={(s.value??0)>=0?'up':'down'}>{fmt(s.value)} {t.unit} <em>({fmt(s.pct)}%)</em></b></div>)}{!(market?.spreads||[]).length&&<div className="spread muted"><span>{lang==='ar'?'الفوارق تُحسب تلقائياً عند توفر العقود الثلاثة.':'Spreads compute automatically once all three contracts are priced.'}</span></div>}<div className="note">{lang==='ar'?'المصادر':'Sources'}: {cards.map(c=>`${c.symbol} → ${c.source}`).join(' · ')}{market?.snapshotFetchedAt?` · ${lang==='ar'?'لقطة':'snapshot'} ${market.snapshotFetchedAt.slice(0,10)}`:''}{market?.note?` — ${market.note}`:''}</div></article>
-  <DriversPanel/>
- <section className="grid two"><article className="card"><div className="cardhead"><div><span className="kicker">INVENTORY HUB</span><h2>{t.inventory}</h2></div><span className="local">LOCAL</span></div><div className="inventoryTotal"><strong>120,000</strong><span>MT</span></div><div className="bar"><span style={{width:`${priced}%`}}/></div><div className="invgrid"><div><b>{priced}%</b><span>{t.priced}</span></div><div><b>{unpriced}%</b><span>{t.unpriced}</span></div></div><div className="warning">⚠ {lang==='ar'?'المخزون غير المسعّر يحتاج إلى متابعة مدير المشتريات.':'Unpriced stock requires procurement manager attention.'}</div></article>
- <article className="card"><div className="cardhead"><div><span className="kicker">AIS / LOGISTICS</span><h2>{t.logistics}</h2></div><span className={vessel?.connected?'online':'offline'}>{vessel?.connected?t.connected:t.notConnected}</span></div><div className="map"><div className="mapgrid"/><div className="mapmsg"><div className="ship">🚢</div><b>{t.vessel}</b><span>{vessel?.message||t.notConnected}</span><a href={vessel?.sourceUrl||'https://www.vesselfinder.com/realtime-ais-data'} target="_blank">VesselFinder ↗</a></div></div></article></section>
- <footer><span>External Procurement Intelligence</span><span>Next.js • API-driven • Port 3003</span></footer></main>
+type Contract = {
+  symbol: string; name: string; label: string; role: 'forward'; available: boolean;
+  last: number | null; open: number | null; high: number | null; low: number | null;
+  prevClose: number | null; change: number | null; changePct: number | null;
+  mode: string; source: string; sourceUrl: string; note: string | null;
+};
+type Market = {
+  updatedAt: string; source: string; mode: string;
+  providers: { barchart: boolean; stooq?: boolean; yahoo: boolean };
+  note: string | null; snapshotFetchedAt?: string | null;
+  contracts: Contract[];
+  spreads: { from: string; to: string; value: number | null; pct: number | null }[];
+  coverage: { total: number; priced: number };
+};
+
+type DriverNews = {
+  title: string; titleAr?: string; link: string; source: string; publishedAt: string | null;
+  topic: string; topicAr: string; topicEn: string;
+};
+type DriversFeed = {
+  news?: DriverNews[];
+  uploads?: { items?: { id: string; text: string; topicAr: string; topicEn: string; file: string }[] } | null;
+};
+
+const A = {
+  ar: {
+    title: 'Smart Sugar AI', sub: 'لوحة موحدة لاتخاذ القرار',
+    refresh: 'تحديث', auto: 'تحديث تلقائي', updated: 'آخر تحديث', source: 'المصدر',
+    tickerLabel: 'عوامل السكر',
+  },
+  en: {
+    title: 'Smart Sugar AI', sub: 'Single decision dashboard',
+    refresh: 'Refresh', auto: 'Auto refresh', updated: 'Updated', source: 'Source',
+    tickerLabel: 'Sugar drivers',
+  },
+};
+
+export default function Page() {
+  return (
+    <LangProvider>
+      <AuthProvider>
+        <ContractProvider>
+          <Dashboard />
+        </ContractProvider>
+      </AuthProvider>
+    </LangProvider>
+  );
+}
+
+function Dashboard() {
+  const { lang, setLang } = useLang();
+  const t = A[lang];
+  const { nyPrice: selectedNyPrice } = useContract();
+  const [market, setMarket] = useState<Market | null>(null);
+  const [last, setLast] = useState('');
+  const [feed, setFeed] = useState<DriversFeed | null>(null);
+  const [londonFeed, setLondonFeed] = useState<LondonFeed>({ data: null, loading: true, error: null });
+
+  const load = useCallback(async () => {
+    try {
+      const m = await fetch('/api/market', { cache: 'no-store' }).then((r) => r.json());
+      setMarket(m);
+      setLast(new Date().toLocaleTimeString(lang === 'ar' ? 'ar-YE' : 'en-US'));
+    } catch { /* keep last good snapshot */ }
+    try {
+      const j = await fetch('/api/london', { cache: 'no-store' }).then((r) => r.json());
+      if (j.available && j.data) {
+        setLondonFeed({ data: j.data as LondonData, loading: false, error: null });
+      } else {
+        setLondonFeed((f) => ({ ...f, loading: false, error: j.error || (lang === 'ar' ? 'لا توجد بيانات متاحة' : 'No data available') }));
+      }
+    } catch (e) {
+      setLondonFeed((f) => ({ ...f, loading: false, error: e instanceof Error ? e.message : (lang === 'ar' ? 'فشل الاتصال' : 'Connection failed') }));
+    }
+  }, [lang]);
+
+  const loadDrivers = useCallback(async () => {
+    try {
+      const j = await fetch('/api/drivers').then((r) => r.json());
+      setFeed({ news: j.news ?? [], uploads: j.uploads ?? null });
+    } catch { /* ticker stays on last items */ }
+  }, []);
+
+  useEffect(() => {
+    load();
+    loadDrivers();
+    const id = setInterval(load, 60_000);
+    const did = setInterval(loadDrivers, 5 * 60_000);
+    return () => { clearInterval(id); clearInterval(did); };
+  }, [load, loadDrivers]);
+
+  const nyPrice = market?.contracts?.[0]?.last ?? null;
+
+  const tickerItems = useMemo<TickerItem[]>(() => {
+    const items: TickerItem[] = [];
+    if (nyPrice != null) {
+      const c = market?.contracts?.[0];
+      items.push({
+        id: 'price',
+        text: `${c?.label ?? 'Sugar #11'}: ${nyPrice.toFixed(2)}¢/lb`,
+        topic: 'ICE', topicAr: 'سعر', source: 'Yahoo',
+      });
+    }
+    const HAZARD = new Set(['weather', 'quake', 'geopolitics', 'shipping']);
+    const ranked = [...(feed?.news ?? [])].sort((a, b) => {
+      const r = (n: DriverNews) => (HAZARD.has(n.topic) ? 0 : n.topic === 'general' ? 2 : 1);
+      return r(a) - r(b);
+    });
+    ranked.slice(0, 20).forEach((n, i) => {
+      items.push({
+        id: `n${i}`,
+        text: lang === 'ar' ? (n.titleAr ?? n.title) : n.title,
+        topic: n.topicEn, topicAr: n.topicAr, source: n.source, href: n.link, origin: 'live',
+      });
+    });
+    (feed?.uploads?.items ?? []).slice(0, 10).forEach((u) => {
+      items.push({
+        id: u.id, text: u.text,
+        topic: u.topicEn, topicAr: u.topicAr, source: u.file, origin: 'upload',
+      });
+    });
+    return items;
+  }, [market, nyPrice, feed]);
+
+  return (
+    <main dir={lang === 'ar' ? 'rtl' : 'ltr'} className="shell">
+      <header className="top">
+        <div>
+          <div className="eyebrow">SMART SUGAR AI · EXECUTIVE DASHBOARD</div>
+          <h1>{t.title}</h1>
+        </div>
+        <div className="actions">
+          <UserBadge />
+          <button onClick={() => setLang('ar')} className={lang === 'ar' ? 'active' : ''}>عربي</button>
+          <button onClick={() => setLang('en')} className={lang === 'en' ? 'active' : ''}>EN</button>
+          <button onClick={load}>{t.refresh}</button>
+        </div>
+      </header>
+
+      {/* Executive decision KPI strip */}
+      <ExecutiveSnapshot ny={market?.contracts?.[0] ?? null} london={londonFeed.data} />
+
+      {/* Prices row + raw-sugar chart (chart takes the old S&P500 slot) */}
+      <section className="grid-row grid-row--3">
+        <div className="grid-stack">
+          <NearContractCard />
+          <NextContractCard />
+        </div>
+        <LondonSugarCard nyPrice={selectedNyPrice ?? nyPrice} feed={londonFeed} />
+        <CashChart compact />
+      </section>
+
+      {/* Inventory + Vessels + Recommendation */}
+      <section className="grid-row grid-row--3">
+        <InventoryHub />
+        <VesselTracker />
+        <RecommendationCard />
+      </section>
+
+      {/* Pricing ledger — hidden for now (may be re-enabled later) */}
+
+      {/* Vessel pricing — fed from daily reports */}
+      <VesselPricingTable />
+
+      {/* Market news & drivers */}
+      <DriversPanel />
+
+      {/* Refined sugar prices (pulled from reports) */}
+      <RefinedPrices />
+
+      {/* Daily reports — system feed (upload zone at the very bottom) */}
+      <ReportsDaily />
+
+      {/* Status + sugar-drivers strips (moved from the header to the bottom) */}
+      <section className="statusbar">
+        <span className="dot" />
+        {t.auto}: 60s · {t.updated}: {last || '—'} · {t.source}: {market?.source || '—'}
+        {market?.note ? ` · ${lang === 'ar' ? 'حدّث لقطة العقود: npm run fetch:contracts' : market.note}` : ''}
+      </section>
+
+      <NewsTicker items={tickerItems} lang={lang} labelAr={t.tickerLabel} labelEn={t.tickerLabel} />
+
+      <footer>
+        <span>Smart Sugar AI — Executive Sugar Market &amp; Procurement Intelligence Platform</span>
+        <span>v2.1</span>
+      </footer>
+
+      <ChatAssistant />
+    </main>
+  );
 }

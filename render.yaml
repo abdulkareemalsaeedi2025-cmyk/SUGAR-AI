@@ -1,22 +1,39 @@
-# Render blueprint for external-procurement-dashboard
-# Docs: https://render.com/docs/blueprint-spec
-
+# Render blueprint — Smart Sugar AI web service.
+# Dashboard → New → Blueprint → point at the repo; Render reads this file.
+# Env vars marked sync:false must be pasted manually in the dashboard
+# (they are secrets and never live in the repo).
 services:
   - type: web
-    name: sugar-procurement-dashboard
+    name: smart-sugar-ai
     runtime: node
-    plan: free
-    region: frankfurt
+    plan: starter            # free plan sleeps after 15 min idle — starter stays warm for the TV
     buildCommand: npm ci && npm run build
-    startCommand: npm run start
-    healthCheckPath: /
-    # Pinned so a fresh Node 25 release cannot break the build.
+    startCommand: node node_modules/next/dist/bin/next start -p $PORT
+    healthCheckPath: /api/health
     envVars:
-      - key: NODE_VERSION
-        value: "22"
-      # Uploads are off: free instances have an ephemeral disk and /api/upload
-      # persists to ./data. Set to 1 only after attaching a persistent disk.
-      - key: NEXT_PUBLIC_UPLOAD_ENABLED
-        value: "0"
-    autoDeploy: true
-    autoDeployTrigger: commit
+      - key: NODE_ENV
+        value: production
+      - key: DATABASE_URL
+        sync: false          # Supabase session-pooler connection string
+      - key: AUTH_SECRET
+        generateValue: true  # Render generates a strong random secret
+      - key: ADMIN_USERNAME
+        sync: false
+      - key: ADMIN_PASSWORD
+        sync: false
+      - key: REFRESH_TOKEN
+        generateValue: true
+      - key: LLM_API_KEY
+        sync: false
+      - key: LLM_BASE_URL
+        sync: false
+      - key: LLM_MODEL
+        sync: false
+      - key: BARCHART_API_KEY
+        sync: false
+      - key: VESSELFINDER_API_KEY
+        sync: false
+      - key: WEATHER_LAT
+        value: "-23.96"
+      - key: WEATHER_LON
+        value: "-46.33"

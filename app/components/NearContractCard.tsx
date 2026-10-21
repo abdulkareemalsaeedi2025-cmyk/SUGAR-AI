@@ -1,5 +1,8 @@
 'use client';
 import { useEffect, useRef, useState } from 'react';
+import { useContract } from './ContractContext';
+import { useLang } from './LangContext';
+import { ago, pick } from '../../lib/i18n';
 
 type Contract = {
   symbol: string;
@@ -9,6 +12,7 @@ type Contract = {
   expired: boolean;
   next?: { symbol: string; labelAr: string; labelEn: string } | null;
 };
+type Point = { t: number; c: number; o?: number | null; h?: number | null; l?: number | null };
 type Series = {
   updatedAt?: string;
   stale?: boolean;
@@ -25,34 +29,19 @@ type Series = {
   high?: number | null;
   low?: number | null;
   bars?: number;
+  granularity?: 'intraday' | 'hourly' | 'daily';
+  points?: Point[];
 };
 
-type Rec = {
-  net: number;
-  action: string;
-  actionAr: string;
-  fixNow: number;
-  limitPrice: number | null;
-  fairValue: number | null;
-  edgePct: number | null;
-  confidence: number;
-  confidenceAr: string;
-  missing: string[];
-  tranches: { pct: number; triggerAr: string }[];
-  factors: { key: string; ar: string; reading: string; score: number; weight: number }[];
-  caveats: string[];
-};
-type RecResp = { recommendation: Rec | null; cash?: { last: number; source: string } | null; next?: { symbol: string; last: number } | null };
-
-/**
- * Headline price tile for the nearest upcoming ICE Sugar No.11 delivery month.
- * Rolls to the next month on its own once the current one is done.
- */
-export default function NearContractCard() {
+export default function NearContractCard({ contractSymbol, customLabel }: { contractSymbol?: string; customLabel?: string }) {
+  const { nyChoice } = useContract();
+  const { lang } = useLang();
   const [d, setD] = useState<Series | null>(null);
   const [age, setAge] = useState<number | null>(null);
-  const [rec, setRec] = useState<RecResp | null>(null);
   const abort = useRef<AbortController | null>(null);
+  // When a fixed symbol is given (e.g. SBK27 May 2027) the card always shows
+  // that contract; otherwise it follows the selector / nearest contract.
+  const effective = contractSymbol ?? nyChoice;
 
   useEffect(() => {
     let alive = true;
@@ -61,7 +50,8 @@ export default function NearContractCard() {
       const ctl = new AbortController();
       abort.current = ctl;
       try {
-        const r = await fetch('/api/series?range=3mo&contract=near', { cache: 'no-store', signal: ctl.signal });
+        const q = effective ? `contract=${encodeURIComponent(effective)}` : 'contract=near';
+        const r = await fetch(`/api/series?range=1d&${q}`, { cache: 'no-store', signal: ctl.signal });
         const j = (await r.json()) as Series;
         if (!alive) return;
         setD(j);
@@ -71,24 +61,12 @@ export default function NearContractCard() {
         /* keep last good value */
       }
     };
-    const pullRec = async () => {
-      try {
-        const r = await fetch('/api/recommend', { cache: 'no-store' });
-        const j = (await r.json()) as RecResp;
-        if (alive) setRec(j);
-      } catch {
-        /* recommendation is advisory; the price tile still works without it */
-      }
-    };
     pull();
-    pullRec();
     const id = setInterval(pull, 30_000);
-    const idRec = setInterval(pullRec, 120_000);
     const tick = setInterval(() => setD((p) => p), 1000);
-    return () => { alive = false; clearInterval(id); clearInterval(idRec); clearInterval(tick); abort.current?.abort(); };
-  }, []);
+    return () => { alive = false; clearInterval(id); clearInterval(tick); abort.current?.abort(); };
+  }, [effective]);
 
-  // Recompute the visible age each tick so it counts up live.
   useEffect(() => {
     if (!d?.updatedAt) return setAge(null);
     const t = Date.parse(d.updatedAt);
@@ -96,12 +74,18 @@ export default function NearContractCard() {
     setAge(Math.max(0, Math.round((Date.now() - t) / 1000)));
   }, [d]);
 
+  const dir = lang === 'ar' ? 'rtl' : 'ltr';
+  const selectedLabel = pick(lang, 'العقد المحدد', 'Selected contract');
+  const nearLabel = pick(lang, 'أقرب عقد قادم', 'Nearest upcoming contract');
+  const loadingLabel = pick(lang, 'جارِ التحميل…', 'Loading…');
+  const headLabel = customLabel ?? (effective ? selectedLabel : nearLabel);
+
   if (!d?.contract) {
     return (
-      <section className="nearcard nearcard--wait" dir="rtl">
+      <section className="nearcard nearcard--wait" dir={dir}>
         <div className="nearcard__main">
-          <span className="nearcard__label">أقرب عقد قادم</span>
-          <strong className="nearcard__price">جارِ التحميل…</strong>
+          <span className="nearcard__label">{headLabel}</span>
+          <strong className="nearcard__price">{loadingLabel}</strong>
         </div>
       </section>
     );
@@ -111,14 +95,36 @@ export default function NearContractCard() {
   const up = (d.change ?? 0) >= 0;
   const months = c.monthsOut;
 
+  // One-day OHLC: intraday → first bar open + session max/min; daily → last
+  // trade day's own bar. (Never the multi-day period stats — removed per owner.)
+  const pts = d.points ?? [];
+  let dayOpen: number | null = null, dayHigh: number | null = null, dayLow: number | null = null;
+  if (pts.length) {
+    if (d.granularity === 'intraday') {
+      dayOpen = pts[0].o ?? pts[0].c ?? null;
+      dayHigh = Math.max(...pts.map((p) => p.h ?? p.c));
+      dayLow = Math.min(...pts.map((p) => p.l ?? p.c));
+    } else {
+      const b = pts[pts.length - 1];
+      dayOpen = b.o ?? b.c ?? null;
+      dayHigh = b.h ?? b.c ?? null;
+      dayLow = b.l ?? b.c ?? null;
+    }
+  }
+
+  const monthsTxt = pick(
+    lang,
+    months <= 0 ? 'تسليم الحالي' : `تسليم خلال ${months} ${months === 1 ? 'شهر' : 'أشهر'}`,
+    months <= 0 ? 'Current delivery' : `Delivery in ${months} ${months === 1 ? 'month' : 'months'}`,
+  );
+  const sinceTxt = pick(lang, 'تغير اليوم', 'today');
+
   return (
-    <section className="nearcard" dir="rtl">
-      <div className="nearcard__grid">
-        <div className="nearcard__left">
+    <section className="nearcard" dir={dir}>
       <div className="nearcard__main">
         <span className="nearcard__label">
           <i className="nearcard__pulse" />
-          أقرب عقد قادم · Sugar No.11
+          {headLabel} · Sugar No.11
         </span>
         <div className="nearcard__price">
           {d.last != null ? d.last.toFixed(2) : '—'}
@@ -129,143 +135,42 @@ export default function NearContractCard() {
             {d.change != null ? `${up ? '+' : ''}${d.change.toFixed(2)}` : '—'}
             {d.changePct != null ? ` (${up ? '+' : ''}${d.changePct.toFixed(2)}%)` : ''}
           </b>
-          <span className="nearcard__since">من أول الفترة</span>
+          <span className="nearcard__since">{sinceTxt}</span>
         </div>
       </div>
 
       <div className="nearcard__meta">
         <div className="nearcard__month">
           <span className="nearcard__sym">{c.symbol}</span>
-          <strong>{c.labelAr}</strong>
-          <em>تسليم {months <= 0 ? 'الحالي' : `خلال ${months} ${months === 1 ? 'شهر' : 'أشهر'}`}</em>
+          <strong>{pick(lang, c.labelAr, c.labelEn)}</strong>
+          <em>{monthsTxt}</em>
         </div>
 
         <div className="nearcard__ohlc">
-          <div><span>أعلى</span><b>{d.periodHigh?.toFixed(2) ?? '—'}</b></div>
-          <div><span>أدنى</span><b>{d.periodLow?.toFixed(2) ?? '—'}</b></div>
-          <div><span>أعمدة</span><b>{d.bars ?? '—'}</b></div>
-        </div>
-      </div>
-        </div>
-
-        <div className="nearcard__right">
-          {rec?.recommendation ? (
-            <Recommendation rec={rec.recommendation} />
-          ) : (
-            <div className="rec rec--hold rec--loading">
-              <span className="rec__tag">مقترح الشراء والتثبيت</span>
-              <strong className="rec__pending">جارِ احتساب المقترح…</strong>
-            </div>
-          )}
+          <div><span>{pick(lang, 'الفتح', 'Open')}</span><b>{dayOpen != null ? dayOpen.toFixed(2) : '—'}</b></div>
+          <div><span>{pick(lang, 'أعلى', 'High')}</span><b>{dayHigh != null ? dayHigh.toFixed(2) : '—'}</b></div>
+          <div><span>{pick(lang, 'أدنى', 'Low')}</span><b>{dayLow != null ? dayLow.toFixed(2) : '—'}</b></div>
+          <div><span>{pick(lang, 'إغلاق سابق', 'Prev close')}</span><b>{d.prevClose?.toFixed(2) ?? '—'}</b></div>
         </div>
       </div>
 
       <div className="nearcard__foot">
         <span className="nearcard__roll">
           {c.expired
-            ? 'انتهت كل العقود المتتبعة — شغّل npm run fetch:contracts'
+            ? pick(lang, 'انتهت كل العقود المتتبعة — شغّل npm run fetch:contracts', 'All tracked contracts expired — run npm run fetch:contracts')
             : c.next
-              ? `ينتقل تلقائياً إلى ${c.next.labelAr} (${c.next.symbol}) عند انتهاء ${c.labelAr}`
-              : 'لا يوجد عقد تالٍ في اللقطة الحالية'}
+              ? pick(
+                  lang,
+                  `ينتقل تلقائياً إلى ${c.next.labelAr} (${c.next.symbol}) عند انتهاء ${c.labelAr}`,
+                  `Rolls automatically to ${c.next.labelEn} (${c.next.symbol}) when ${c.labelEn} expires`,
+                )
+              : pick(lang, 'لا يوجد عقد تالٍ في اللقطة الحالية', 'No next contract in the current snapshot')}
         </span>
         <span className="nearcard__age">
-          {age != null ? `آخر جلب ${age < 2 ? 'الآن' : `قبل ${age} ث`}` : '—'}
-          {d.stale ? ' · بيانات مخزنة' : ''}
+          {age != null ? `${pick(lang, 'آخر جلب', 'fetched')} ${ago(lang, age)}` : '—'}
+          {d.stale ? pick(lang, ' · بيانات مخزنة', ' · cached data') : ''}
         </span>
       </div>
     </section>
-  );
-}
-const TONE: Record<string, string> = {
-  buy_now: 'rec--buy',
-  buy_gradual: 'rec--buy',
-  hold: 'rec--hold',
-  wait: 'rec--wait',
-  avoid: 'rec--avoid',
-};
-
-/** Purchase proposal: what to fix, at what limit, split into tranches. */
-function Recommendation({ rec }: { rec: Rec }) {
-  const [open, setOpen] = useState(false);
-  const fix = Math.round(rec.fixNow * 100);
-  const bullish = rec.net >= 20;
-  const bearish = rec.net <= -20;
-
-  return (
-    <div className={`rec ${TONE[rec.action] ?? 'rec--hold'}`}>
-      <div className="rec__top">
-        <span className="rec__tag">
-          <i className="rec__dot" />
-          مقترح الشراء والتثبيت
-        </span>
-        <span className="rec__conf" title="جودة البيانات ووضوح الاتجاه">
-          {rec.confidenceAr} · {rec.confidence}%
-        </span>
-      </div>
-
-      <div className="rec__call">
-        <strong>{rec.actionAr}</strong>
-        <span className={`rec__score ${bullish ? 'up' : bearish ? 'dn' : ''}`}>
-          {rec.net > 0 ? '+' : ''}
-          {rec.net}
-        </span>
-      </div>
-
-      <div className="rec__nums">
-        <div>
-          <span>ثبّت الآن</span>
-          <b>{fix}%</b>
-        </div>
-        <div>
-          <span>سعر الحد</span>
-          <b>{rec.limitPrice != null ? rec.limitPrice.toFixed(2) : '—'}</b>
-        </div>
-        <div>
-          <span>القيمة العادلة</span>
-          <b>{rec.fairValue != null ? rec.fairValue.toFixed(2) : '—'}</b>
-        </div>
-        <div>
-          <span>أفق القرار</span>
-          <b>30 يوم</b>
-        </div>
-      </div>
-
-      {rec.tranches.length > 0 && (
-        <ul className="rec__tranches">
-          {rec.tranches.map((t) => (
-            <li key={t.triggerAr}>
-              <b>{t.pct}%</b>
-              <span>{t.triggerAr}</span>
-            </li>
-          ))}
-        </ul>
-      )}
-
-      <button type="button" className="rec__toggle" onClick={() => setOpen((o) => !o)} aria-expanded={open}>
-        {open ? 'إخفاء الأسس' : `عرض الأسس (${rec.factors.length})`}
-      </button>
-
-      {open && (
-        <div className="rec__detail">
-          {rec.factors.map((f) => (
-            <div key={f.key} className="rec__factor">
-              <span className="rec__fname">{f.ar}</span>
-              <span className="rec__fbar" aria-hidden>
-                <i style={{ width: `${Math.abs(f.score) * 50}%` }} className={f.score >= 0 ? 'pos' : 'neg'} />
-              </span>
-              <span className="rec__fread">{f.reading}</span>
-            </div>
-          ))}
-          {rec.missing.length > 0 && (
-            <p className="rec__missing">لم تتوفر قراءة: {rec.missing.join('، ')} — حُسبت كنقص في الثقة.</p>
-          )}
-          <ul className="rec__caveats">
-            {rec.caveats.map((c) => (
-              <li key={c}>{c}</li>
-            ))}
-          </ul>
-        </div>
-      )}
-    </div>
   );
 }

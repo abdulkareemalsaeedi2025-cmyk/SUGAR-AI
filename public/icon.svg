@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+  <rect width="512" height="512" rx="96" fill="#2563eb"/>
+  <rect x="120" y="180" width="120" height="120" rx="18" fill="#fff" opacity="0.95"/>
+  <rect x="196" y="124" width="120" height="120" rx="18" fill="#fff" opacity="0.75"/>
+  <rect x="272" y="212" width="120" height="120" rx="18" fill="#fff" opacity="0.9"/>
+  <text x="256" y="430" font-family="Arial, sans-serif" font-size="72" font-weight="800" fill="#fff" text-anchor="middle">S11</text>
+</svg>

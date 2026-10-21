@@ -1,7 +1,8 @@
 'use client';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import NewsTicker, { type TickerItem } from './NewsTicker';
 import { UPLOAD_ENABLED } from '../../lib/featureFlags';
+import { useLang } from './LangContext';
+import { ago, pick } from '../../lib/i18n';
 
 type Macro = {
   symbol: string;
@@ -19,6 +20,7 @@ type Macro = {
 
 type News = {
   title: string;
+  titleAr?: string;
   link: string;
   source: string;
   publishedAt: string | null;
@@ -51,11 +53,12 @@ type Weather = {
   ok: boolean;
 };
 
-type Tab = 'drivers' | 'news' | 'files' | 'weather';
+type Tab = 'drivers' | 'news' | 'weather' | 'files';
 
 const TOPIC_ORDER = ['weather', 'quake', 'geopolitics', 'shipping', 'brazil', 'india', 'thailand', 'energy', 'stocks', 'market', 'currency', 'policy', 'general'];
 
 export default function DriversPanel() {
+  const { lang } = useLang();
   const [macro, setMacro] = useState<Macro[]>([]);
   const [news, setNews] = useState<News[]>([]);
   const [uploaded, setUploaded] = useState<UploadedItem[]>([]);
@@ -107,44 +110,17 @@ export default function DriversPanel() {
       setUploadMsg({
         ok: !bad.length && total > 0,
         text: bad.length
-          ? `${total} عامل مستخرج — ${bad.length} ملف فشل`
-          : `تم استخراج ${total} عامل من ${(j.results ?? []).length} ملف`,
+          ? pick(lang, `${total} عامل مستخرج — ${bad.length} ملف فشل`, `${total} drivers extracted — ${bad.length} file(s) failed`)
+          : pick(lang, `تم استخراج ${total} عامل من ${(j.results ?? []).length} ملف`, `Extracted ${total} drivers from ${(j.results ?? []).length} file(s)`),
       });
       await load();
     } catch {
-      setUploadMsg({ ok: false, text: 'فشل الاتصال بالخادم' });
+      setUploadMsg({ ok: false, text: pick(lang, 'فشل الاتصال بالخادم', 'Server unreachable') });
     } finally {
       setBusy(false);
       if (fileRef.current) fileRef.current.value = '';
     }
   }
-
-  const tickerItems = useMemo<TickerItem[]>(() => {
-    const HAZARD = new Set(['weather', 'quake', 'geopolitics', 'shipping']);
-    // Hazard headlines lead the ticker, then market, then everything else.
-    const ranked = [...news].sort((a, b) => {
-      const r = (n: News) => (HAZARD.has(n.topic) ? 0 : n.topic === 'general' ? 2 : 1);
-      return r(a) - r(b);
-    });
-    const fromNews: TickerItem[] = ranked.slice(0, 20).map((n, i) => ({
-      id: `n${i}`,
-      text: n.title,
-      topic: n.topicEn,
-      topicAr: n.topicAr,
-      source: n.source,
-      href: n.link,
-      origin: 'live',
-    }));
-    const fromFiles: TickerItem[] = uploaded.slice(0, 10).map((u) => ({
-      id: u.id,
-      text: u.text,
-      topic: u.topicEn,
-      topicAr: u.topicAr,
-      source: u.file,
-      origin: 'upload',
-    }));
-    return [...fromNews, ...fromFiles];
-  }, [news, uploaded]);
 
   const byTopic = useMemo(() => {
     const m = new Map<string, News[]>();
@@ -162,23 +138,19 @@ export default function DriversPanel() {
     if (!iso) return '';
     const ms = Date.now() - Date.parse(iso);
     if (!Number.isFinite(ms) || ms < 0) return '';
-    const s = Math.round(ms / 1000);
-    if (s < 45) return 'الآن';
-    if (s < 3600) return `${Math.round(s / 60)} د`;
-    if (s < 86400) return `${Math.round(s / 3600)} س`;
-    return `${Math.round(s / 86400)} ي`;
+    return ago(lang, Math.round(ms / 1000));
   };
 
-  return (
-    <section className="sdrv" dir="rtl">
-      <NewsTicker items={tickerItems} />
+  const dir = lang === 'ar' ? 'rtl' : 'ltr';
 
+  return (
+    <section className="sdrv" dir={dir}>
       <header className="sdrv__head">
-        <h2>العوامل المؤثرة في سوق السكر</h2>
+        <h2>{pick(lang, 'العوامل المؤثرة في سوق السكر', 'Sugar market drivers')}</h2>
         <div className="sdrv__meta">
-          {loading ? 'جارِ التحميل…' : error ? <span className="sdrv__err">{error}</span> : `آخر تحديث ${when(updatedAt) || '—'}`}
+          {loading ? pick(lang, 'جارِ التحميل…', 'Loading…') : error ? <span className="sdrv__err">{error}</span> : `${pick(lang, 'آخر تحديث', 'Updated')} ${when(updatedAt) || '—'}`}
           <button type="button" onClick={load} disabled={loading} className="sdrv__refresh">
-            تحديث
+            {pick(lang, 'تحديث', 'Refresh')}
           </button>
         </div>
       </header>
@@ -186,10 +158,10 @@ export default function DriversPanel() {
       <nav className="sdrv__tabs" role="tablist">
         {(
           [
-            ['drivers', `المؤشرات (${macro.filter((m) => m.ok).length})`],
-            ['news', `الأخبار (${news.length})`],
-            ['weather', `الطقس (${weather.filter((w) => w.ok).length})`],
-            ['files', UPLOAD_ENABLED ? `الملفات (${uploaded.length})` : 'الملفات (معطّل)'],
+            ['drivers', pick(lang, `المؤشرات (${macro.filter((m) => m.ok).length})`, `Indicators (${macro.filter((m) => m.ok).length})`)],
+            ['news', pick(lang, `الأخبار (${news.length})`, `News (${news.length})`)],
+            ['weather', pick(lang, `الطقس (${weather.filter((w) => w.ok).length})`, `Weather (${weather.filter((w) => w.ok).length})`)],
+            ['files', UPLOAD_ENABLED ? pick(lang, `الملفات (${uploaded.length})`, `Files (${uploaded.length})`) : pick(lang, 'الملفات (معطّل)', 'Files (off)')],
           ] as [Tab, string][]
         ).map(([k, label]) => (
           <button key={k} type="button" role="tab" aria-selected={tab === k} className={tab === k ? 'is-on' : ''} onClick={() => setTab(k)}>
@@ -203,9 +175,9 @@ export default function DriversPanel() {
           {macro.map((m) => (
             <article key={m.symbol} className={`driver ${m.ok ? '' : 'driver--down'}`}>
               <div className="driver__top">
-                <h3>{m.ar}</h3>
+                <h3>{pick(lang, m.ar, m.en)}</h3>
                 <span className={`driver__impact driver__impact--${m.impact}`}>
-                  {m.impact === 'high' ? 'أثر عالٍ' : 'أثر متوسط'}
+                  {m.impact === 'high' ? pick(lang, 'أثر عالٍ', 'High impact') : pick(lang, 'أثر متوسط', 'Medium impact')}
                 </span>
                 <span className="driver__sym">{m.symbol}</span>
               </div>
@@ -218,7 +190,7 @@ export default function DriversPanel() {
                   </em>
                 )}
               </div>
-              <p>{m.whyAr}</p>
+              <p>{pick(lang, m.whyAr, m.whyEn ?? m.whyAr)}</p>
             </article>
           ))}
         </div>
@@ -228,12 +200,12 @@ export default function DriversPanel() {
         <div className="news">
           {byTopic.map(([topic, list]) => (
             <div key={topic} className="news__group">
-              <h3 className="news__topic">{list[0].topicAr}</h3>
+              <h3 className="news__topic">{pick(lang, list[0].topicAr, list[0].topicEn ?? list[0].topic)}</h3>
               <ul>
                 {list.map((n, i) => (
                   <li key={`${topic}-${i}`}>
                     <a href={n.link} target="_blank" rel="noreferrer noopener">
-                      {n.title}
+                      {lang === 'ar' ? (n.titleAr ?? n.title) : n.title}
                     </a>
                     <span className="news__src">
                       {n.source} · {when(n.publishedAt)}
@@ -254,24 +226,24 @@ export default function DriversPanel() {
             return (
               <article key={w.key} className={`wxcard${w.ok ? '' : ' driver--down'}`}>
                 <div className="wxcard__top">
-                  <h3>{w.ar}</h3>
+                  <h3>{pick(lang, w.ar, w.en)}</h3>
                   <span className={`wxcard__badge ${heavy ? 'is-heavy' : light ? 'is-rain' : 'is-dry'}`}>
-                    {heavy ? 'أمطار غزيرة' : light ? 'أمطار' : 'جاف'}
+                    {heavy ? pick(lang, 'أمطار غزيرة', 'Heavy rain') : light ? pick(lang, 'أمطار', 'Rain') : pick(lang, 'جاف', 'Dry')}
                   </span>
                 </div>
                 <div className="wxcard__temp">{w.ok && w.temp != null ? `${Math.round(w.temp)}°` : '—'}</div>
                 <dl>
-                  <div><dt>هطول اليوم</dt><dd>{w.rainDay != null ? `${w.rainDay} mm` : '—'}</dd></div>
-                  <div><dt>هطول الآن</dt><dd>{w.rainNow != null ? `${w.rainNow} mm` : '—'}</dd></div>
-                  <div><dt>أعلى حرارة</dt><dd>{w.tmax != null ? `${Math.round(w.tmax)}°C` : '—'}</dd></div>
-                  <div><dt>الرياح</dt><dd>{w.wind != null ? `${Math.round(w.wind)} km/h` : '—'}</dd></div>
+                  <div><dt>{pick(lang, 'هطول اليوم', 'Rain today')}</dt><dd>{w.rainDay != null ? `${w.rainDay} mm` : '—'}</dd></div>
+                  <div><dt>{pick(lang, 'هطول الآن', 'Rain now')}</dt><dd>{w.rainNow != null ? `${w.rainNow} mm` : '—'}</dd></div>
+                  <div><dt>{pick(lang, 'أعلى حرارة', 'Max temp')}</dt><dd>{w.tmax != null ? `${Math.round(w.tmax)}°C` : '—'}</dd></div>
+                  <div><dt>{pick(lang, 'الرياح', 'Wind')}</dt><dd>{w.wind != null ? `${Math.round(w.wind)} km/h` : '—'}</dd></div>
                 </dl>
                 <p className="wxcard__note">
                   {heavy
-                    ? 'هطول غزير قد يوقف التموير ويؤخر السحق في المنطقة.'
+                    ? pick(lang, 'هطول غزير قد يوقف التموير ويؤخر السحق في المنطقة.', 'Heavy rain may halt milling and delay crushing in the region.')
                     : light
-                      ? 'هطول خفيف — راقب أثره على نمو القصب.'
-                      : 'لا هطول مؤثر — راقب الحرارة والجفاف.'}
+                      ? pick(lang, 'هطول خفيف — راقب أثره على نمو القصب.', 'Light rain — watch its effect on cane growth.')
+                      : pick(lang, 'لا هطول مؤثر — راقب الحرارة والجفاف.', 'No meaningful rain — watch heat and dryness.')}
                 </p>
               </article>
             );
@@ -305,32 +277,35 @@ export default function DriversPanel() {
               hidden
               onChange={(e) => void send([...(e.target.files ?? [])])}
             />
-            <strong>اسحب ملفات التقرير هنا أو اضغط للاختيار</strong>
-            <span>PDF · Word · Excel — حتى 12 MB</span>
+            <strong>{pick(lang, 'اسحب ملفات التقرير هنا أو اضغط للاختيار', 'Drop report files here or click to browse')}</strong>
+            <span>{pick(lang, 'PDF · Word · Excel — حتى 12 MB', 'PDF · Word · Excel — up to 12 MB')}</span>
           </div>
 
-          {uploadMsg && <p className={`files__msg ${uploadMsg.ok ? 'ok' : 'bad'}`}>{busy ? 'جارِ التحليل…' : uploadMsg.text}</p>}
+          {uploadMsg && <p className={`files__msg ${uploadMsg.ok ? 'ok' : 'bad'}`}>{busy ? pick(lang, 'جارِ التحليل…', 'Analyzing…') : uploadMsg.text}</p>}
 
           <ul className="files__list">
             {uploaded.map((u) => (
               <li key={u.id}>
                 <div className="files__row">
-                  <em className="files__topic">{u.topicAr}</em>
+                  <em className="files__topic">{pick(lang, u.topicAr, u.topicEn ?? u.topicAr)}</em>
                   <span className="files__file">{u.file}</span>
                   <span className="files__rel">{u.relevance}</span>
                 </div>
                 <p>{u.text}</p>
               </li>
             ))}
-            {!uploaded.length && <li className="files__empty">لم تُرفع ملفات بعد.</li>}
+            {!uploaded.length && <li className="files__empty">{pick(lang, 'لم تُرفع ملفات بعد.', 'No files uploaded yet.')}</li>}
           </ul>
             </>
           ) : (
             <div className="files__off">
-              <strong>رفع التقارير معطّل مؤقتاً</strong>
+              <strong>{pick(lang, 'رفع التقارير معطّل مؤقتاً', 'Report upload is temporarily disabled')}</strong>
               <span>
-                التخزين على هذا الخادم للقراءة فقط، والرفع يحتاج قرصاً دائماً. تُبقى بيانات المؤشرات
-                والأخبار والطقس ومقترح الشراء تعمل بشكل طبيعي.
+                {pick(
+                  lang,
+                  'التخزين على هذا الخادم للقراءة فقط، والرفع يحتاج قرصاً دائماً. تُبقى بيانات المؤشرات والأخبار والطقس ومقترح الشراء تعمل بشكل طبيعي.',
+                  'Storage on this server is read-only and upload needs a persistent disk. Indicators, news, weather and the purchase call keep working normally.',
+                )}
               </span>
             </div>
           )}

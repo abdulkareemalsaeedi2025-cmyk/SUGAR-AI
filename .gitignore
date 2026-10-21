@@ -13,6 +13,13 @@ next-env.d.ts
 data/drivers-cache.json
 data/drivers-upload.json
 
+# SQLite store + write-ahead log (created at runtime, holds company data).
+data/smart-sugar.db
+data/smart-sugar.db-shm
+data/smart-sugar.db-wal
+
 # Test scratch
 *.tmp
 *.tsbuildinfo
+# Uploaded company reports (private documents)
+data/daily-reports/

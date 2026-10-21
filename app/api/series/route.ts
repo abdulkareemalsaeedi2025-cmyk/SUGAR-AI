@@ -1,7 +1,9 @@
 import { NextResponse } from 'next/server';
+import { parseContract, monthsUntil, resolveNear, type ContractRef } from '../../../lib/iceCalendar';
 
 const SYMBOL = 'SB=F';
 const MAX_BARS = 1600;
+const SNAPSHOT_MAX_AGE_MS = 5 * 24 * 60 * 60 * 1000;
 
 export type Granularity = 'intraday' | 'hourly' | 'daily';
 
@@ -53,99 +55,154 @@ let snap: { at: number; data: any } | null = null;
 
 async function readSnapshot() {
   if (snap && Date.now() - snap.at < SNAPSHOT_CACHE_MS) return snap.data;
-  const { promises: fs } = await import('node:fs');
-  const path = await import('node:path');
-  const data = JSON.parse(await fs.readFile(path.join(process.cwd(), 'data', 'contracts.json'), 'utf8'));
+  const { readContractsSnapshot } = await import('../../../lib/contractsStore');
+  const data = await readContractsSnapshot();
+  if (!data) throw new Error('contracts snapshot unavailable');
   snap = { at: Date.now(), data };
   return data;
 }
 
-const LIMIT_BY_RANGE: Record<string, number> = { '1d': 40, '5d': 40, '1mo': 22, '3mo': 40, '1y': 40, '5y': 40 };
+const SNAPSHOT_RANGE_DAYS: Record<string, number> = {
+  '1d': 1, '5d': 5, '1mo': 31, '3mo': 92, '1y': 366, '5y': 1830,
+};
+
+function snapshotWindow(range: string, from: string | null, to: string | null) {
+  const validDate = (s: string | null) => !!s && /^\d{4}-\d{2}-\d{2}$/.test(s) && !Number.isNaN(Date.parse(s));
+  if (validDate(from) && validDate(to)) {
+    return { startMs: Date.parse(from as string), endMs: Date.parse(to as string) + 86_400_000, label: `${from} → ${to}` };
+  }
+  const days = SNAPSHOT_RANGE_DAYS[range.toLowerCase()];
+  if (!days) return { startMs: null as number | null, endMs: null as number | null, label: range };
+  return { startMs: Date.now() - days * 86_400_000, endMs: null as number | null, label: range };
+}
+
+type SnapshotBar = { t: number; c: number | null; o: number | null; h: number | null; l: number | null };
 
 /**
- * Series for the nearest upcoming ICE Sugar No.11 delivery month.
+ * A specific delivery month, served from the Stooq snapshot history.
  *
- * Yahoo only serves the rolled continuous ticker (SB=F) and 404s on individual
- * months, so per-contract history comes from the Stooq snapshot written by
- * `npm run fetch:contracts`. Roll-over is resolved on every request.
+ * XML/Yahoo 404s on individual No.11 months, so the snapshot is the only honest
+ * source for "give me SBH27, not the continuous proxy". History is daily; when a
+ * sub-daily range has fewer than two bars we return the full available series
+ * and label it, rather than drawing a one-point chart.
  */
-async function nearContractSeries(range: string, from: string | null, to: string | null) {
-  const { resolveNear, rollHint } = await import('../../../lib/iceCalendar');
+async function snapshotSeries(symbol: string, range: string, from: string | null, to: string | null) {
+  const sym = symbol.toUpperCase();
+  const ref = parseContract(sym);
   const data = await readSnapshot();
-  const priced = (data.contracts ?? []).filter((c: any) => c.role !== 'cash' && c.available && Array.isArray(c.history) && c.history.length);
-  const near = resolveNear(priced.map((c: any) => c.symbol));
-  if (!near) {
-    return NextResponse.json(
-      { error: 'No priced delivery month in the snapshot. Run: npm run fetch:contracts', updatedAt: new Date().toISOString(), points: [] },
-      { status: 503 },
-    );
+  const list: any[] = Array.isArray(data?.contracts) ? data.contracts : [];
+  const snapshotAt: string | null = data?.fetchedAt ?? null;
+  const hit = list.find((c) => String(c?.symbol ?? '').toUpperCase() === sym);
+
+  const base = {
+    updatedAt: new Date().toISOString(),
+    source: 'Stooq snapshot — ICE Sugar No.11',
+    sourceUrl: 'https://stooq.com/q/d/',
+    symbol: sym,
+    currency: 'USX',
+    exchange: 'ICE Futures U.S.',
+    range,
+    rangeLabel: ref ? `${ref.labelEn} (${sym})` : sym,
+    granularity: 'daily' as Granularity,
+    intervalMinutes: '1d',
+    snapshotFetchedAt: snapshotAt,
+  };
+
+  if (!hit || !Array.isArray(hit.history) || hit.history.length === 0) {
+    return {
+      ...base,
+      bars: 0,
+      points: [],
+      trend: null,
+      error: `No snapshot history for ${sym}. Run: npm run fetch:contracts`,
+    };
   }
 
-  const row = priced.find((c: any) => c.symbol === near.symbol);
-  let bars: { t: string; o: number | null; h: number | null; l: number | null; c: number }[] = row.history.filter(
-    (p: any) => p && p.t && typeof p.c === 'number',
-  );
+  const all: SnapshotBar[] = hit.history
+    .map((b: any) => ({
+      t: Math.floor(Date.parse(`${String(b?.t)}T00:00:00Z`) / 1000),
+      c: num(b?.c),
+      o: num(b?.o),
+      h: num(b?.h),
+      l: num(b?.l),
+    }))
+    .filter((b: any): b is SnapshotBar => Number.isFinite(b.t) && b.c !== null)
+    .sort((a: SnapshotBar, b: SnapshotBar) => a.t - b.t);
 
-  if (from && to && /^\d{4}-\d{2}-\d{2}$/.test(from) && /^\d{4}-\d{2}-\d{2}$/.test(to)) {
-    bars = bars.filter((b) => b.t >= from && b.t <= to);
-  } else {
-    bars = bars.slice(-(LIMIT_BY_RANGE[range] ?? 40));
-  }
+  const { startMs, endMs, label } = snapshotWindow(range, from, to);
+  let windowed = all;
+  if (startMs !== null) windowed = windowed.filter((b) => b.t * 1000 >= startMs);
+  if (endMs !== null) windowed = windowed.filter((b) => b.t * 1000 <= endMs);
 
-  const points = bars.map((b) => ({ t: Math.floor(Date.parse(`${b.t}T00:00:00Z`) / 1000), c: b.c, o: b.o, h: b.h, l: b.l }));
-  const values = points.map((x) => x.c);
-  const last = row.last ?? values[values.length - 1] ?? null;
-  const base = values.length > 1 ? values[0] : null;
+  const usedAll = windowed.length < 2;
+  const points = (usedAll ? all : windowed).slice(-MAX_BARS);
+  const values = points.map((p) => p.c as number);
+
+  const last = values[values.length - 1];
+  const prev = values.length >= 2 ? values[values.length - 2] : null;
+  const change = prev !== null ? last - prev : null;
+  const changePct = prev ? ((last - prev) / prev) * 100 : null;
+
   const fit = leastSquares(values);
-  const horizon = Math.min(Math.max(values.length - 1, 1), 12);
-  const projected = fit ? fit.slope * (values.length - 1 + horizon) + fit.intercept : null;
+  const horizon = HORIZON.daily;
+  const trend = fit
+    ? {
+        method: 'least-squares linear regression on daily closes',
+        slopePerBar: fit.slope,
+        r2: fit.r2,
+        stdErr: fit.stdErr,
+        horizonBars: horizon,
+        projectedLast: fit.slope * (values.length - 1 + horizon) + fit.intercept,
+        band: {
+          lower: fit.slope * (values.length - 1 + horizon) + fit.intercept - fit.stdErr,
+          upper: fit.slope * (values.length - 1 + horizon) + fit.intercept + fit.stdErr,
+        },
+      }
+    : null;
 
-  return NextResponse.json(
-    {
-      updatedAt: new Date().toISOString(),
-      snapshotFetchedAt: data.fetchedAt ?? null,
-      source: `Stooq — ICE Sugar No.11 ${near.symbol}`,
-      sourceUrl: row.sourceUrl,
-      symbol: near.symbol,
-      contract: near,
-      rollHint: rollHint(near),
-      currency: 'USX',
-      exchange: 'ICE',
-      range,
-      rangeLabel: `${near.labelEn} (${near.symbol})`,
-      granularity: 'daily' as Granularity,
-      intervalMinutes: '1d',
-      bars: points.length,
-      hasOhlc: points.some((x) => x.h != null),
-      prevClose: null,
-      periodOpen: points.length ? points[0].o ?? values[0] : null,
-      periodHigh: values.length ? Math.max(...allNums(points.map((x) => x.h))) : null,
-      periodLow: values.length ? Math.min(...allNums(points.map((x) => x.l))) : null,
-      last,
-      change: last != null && base != null ? last - base : null,
-      changePct: last != null && base ? ((last - base) / base) * 100 : null,
-      points,
-      trend: fit
-        ? {
-            slopePerBar: fit.slope,
-            r2: fit.r2,
-            stdErr: fit.stdErr,
-            horizonBars: horizon,
-            projectedLast: projected,
-            band: { lower: (projected ?? 0) - fit.stdErr, upper: (projected ?? 0) + fit.stdErr },
-          }
-        : null,
-      stale: false,
-    },
-    { headers: { 'Cache-Control': 'no-store' } },
-  );
+  const pricedSymbols = list
+    .filter((c) => c?.role !== 'cash' && num(c.last) !== null && typeof c?.symbol === 'string')
+    .map((c) => String(c.symbol));
+  const near = resolveNear(pricedSymbols);
+  const next = ref
+    ? pricedSymbols
+        .map(parseContract)
+        .filter((r): r is ContractRef => r !== null && monthsUntil(r.deliveryISO) > monthsUntil(ref.deliveryISO))
+        .sort((a, b) => monthsUntil(a.deliveryISO) - monthsUntil(b.deliveryISO))[0] ?? null
+    : null;
+  const monthsOut = ref ? monthsUntil(ref.deliveryISO) : null;
+  const contract = ref ? { ...ref, monthsOut, expired: (monthsOut ?? 0) < 0, next } : null;
+
+  const ageMs = snapshotAt ? Date.now() - Date.parse(snapshotAt) : Number.NaN;
+  const stale = Number.isFinite(ageMs) && ageMs > SNAPSHOT_MAX_AGE_MS;
+
+  return {
+    ...base,
+    rangeLabel: ref ? `${ref.labelEn} (${sym})` : label,
+    bars: points.length,
+    prevClose: prev,
+    periodOpen: points[0]?.o ?? points[0]?.c ?? null,
+    periodHigh: Math.max(...points.map((p) => (p.h ?? p.c) as number)),
+    periodLow: Math.min(...points.map((p) => (p.l ?? p.c) as number)),
+    last,
+    change,
+    changePct,
+    points,
+    trend,
+    stale,
+    note: usedAll
+      ? `نطاق ${label} يحتوي أقل من عمودين — أُظهرت كامل السلسلة اليومية المتاحة للعقد ${sym}.`
+      : `سلسلة يومية من لقطة Stooq للعقد ${sym} (لا تتوفر أعمدة لحظية لهذا العقد).`,
+    ...(contract ? { contract } : {}),
+    ...(near ? { rollHint: `أقرب عقد في اللقطة: ${near.labelEn} (${near.symbol})` } : {}),
+  };
 }
 
 async function getJSON(url: string, tries = 2): Promise<unknown> {
   let lastErr: unknown;
   for (let i = 0; i < tries; i++) {
     try {
-      const r = await fetch(url, { cache: 'no-store' });
+      const r = await fetch(url, { cache: 'no-store', signal: AbortSignal.timeout(6_000) });
       if (r.status === 429) throw new Error('Yahoo rate limited');
       if (!r.ok) throw new Error(`Yahoo HTTP ${r.status}`);
       return await r.json();
@@ -176,59 +233,65 @@ function leastSquares(ys: number[]) {
   return { slope, intercept, r2: ssTot === 0 ? 0 : 1 - ssRes / ssTot, stdErr: Math.sqrt(ssRes / Math.max(1, n - 2)) };
 }
 
-export async function GET(req: Request) {
-  const p = new URL(req.url).searchParams;
-  const raw = (p.get('range') ?? '1d').toLowerCase();
-  const from = p.get('from');
-  const to = p.get('to');
-  const contract = p.get('contract');
-
-  // "near" tracks the nearest upcoming ICE delivery month straight from the
-  // Stooq snapshot, re-resolving on every request so it rolls Mar -> May by itself.
-  if (contract === 'near') return nearContractSeries(raw, from, to);
-
-  let mode: Preset | 'custom' = (PRESETS as readonly string[]).includes(raw) ? (raw as Preset) : '1d';
-  let interval: string;
-  let granularity: Granularity;
-  let query: string;
-  let label: string;
-
+function buildParams(raw: string, from: string | null, to: string | null): {
+  mode: Preset | 'custom';
+  interval: string;
+  granularity: Granularity;
+  query: string;
+  label: string;
+} {
   const validDate = (s: string | null) => !!s && /^\d{4}-\d{2}-\d{2}$/.test(s) && !Number.isNaN(Date.parse(s));
-
   if (from && to && validDate(from) && validDate(to)) {
     const t1 = Date.parse(from);
     const t2 = Date.parse(to);
-    if (t2 <= t1) {
-      return NextResponse.json({ error: 'The "to" date must be after the "from" date.', range: mode, points: [] }, { status: 400 });
-    }
     const days = (t2 - t1) / 86400000;
-    interval = intervalForSpan(days);
-    granularity = granularityFor(interval);
+    const interval = intervalForSpan(days);
+    const granularity = granularityFor(interval);
     const p1 = t1 - Math.min(days * 0.02 * 86400000, 6 * 3600000);
     const p2 = t2 + Math.min(days * 0.02 * 86400000, 6 * 3600000);
-    query = `period1=${Math.floor(p1 / 1000)}&period2=${Math.floor(p2 / 1000)}&interval=${interval}`;
-    mode = 'custom';
-    label = `${from} → ${to}`;
-  } else {
-    const cfg = RANGE_CONFIG[mode];
-    interval = cfg.interval;
-    granularity = cfg.granularity;
-    query = `${cfg.yahoo}&interval=${cfg.interval}`;
-    label = raw;
+    return {
+      mode: 'custom',
+      interval,
+      granularity,
+      query: `period1=${Math.floor(p1 / 1000)}&period2=${Math.floor(p2 / 1000)}&interval=${interval}`,
+      label: `${from} → ${to}`,
+    };
   }
+  const mode: Preset = (PRESETS as readonly string[]).includes(raw) ? (raw as Preset) : '1d';
+  const cfg = RANGE_CONFIG[mode];
+  return {
+    mode,
+    interval: cfg.interval,
+    granularity: cfg.granularity,
+    query: `${cfg.yahoo}&interval=${cfg.interval}`,
+    label: raw,
+  };
+}
 
+type SeriesMeta = {
+  symbol: string;
+  source: string;
+  sourceUrl: string;
+  rangeLabel?: string;
+  contract?: any;
+  rollHint?: string;
+  snapshotFetchedAt?: string | null;
+};
+
+async function yahooSeries(range: string, from: string | null, to: string | null, meta: SeriesMeta) {
+  const { mode, interval, granularity, query, label } = buildParams(range, from, to);
   const url = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(SYMBOL)}?${query}`;
-  const key = `${mode}|${from ?? ''}|${to ?? ''}`;
+  const key = `${meta.symbol}|${mode}|${from ?? ''}|${to ?? ''}`;
   const ttl = TTL[granularity];
   const hit = cache.get(key);
-  if (hit && Date.now() - hit.at < ttl) return NextResponse.json(hit.body);
+  if (hit && Date.now() - hit.at < ttl) return hit.body;
 
   try {
     const payload = await getJSON(url);
     const result = (payload as any)?.chart?.result?.[0];
     if (!result) throw new Error('empty chart payload');
 
-    const meta = result.meta ?? {};
+    const chartMeta = result.meta ?? {};
     const q = result.indicators?.quote?.[0] ?? {};
     const stamps: number[] = Array.isArray(result.timestamp) ? result.timestamp : [];
     const closes: unknown[] = Array.isArray(q.close) ? q.close : [];
@@ -245,11 +308,11 @@ export async function GET(req: Request) {
     const values = points.map((x) => x.c);
     if (!values.length) throw new Error('no price bars in range');
 
-    const prevClose = granularity === 'intraday' ? num(meta.previousClose) : null;
+    const prevClose = granularity === 'intraday' ? num(chartMeta.previousClose) : null;
     const highs = allNums(q.high);
     const lows = allNums(q.low);
     const opens = allNums(q.open);
-    const last = num(meta.regularMarketPrice) ?? values[values.length - 1];
+    const last = num(chartMeta.regularMarketPrice) ?? values[values.length - 1];
     const base = granularity === 'intraday' ? prevClose : values[0];
     const change = base !== null ? last - base : null;
     const changePct = base ? ((last - base) / base) * 100 : null;
@@ -273,13 +336,13 @@ export async function GET(req: Request) {
 
     const body = {
       updatedAt: new Date().toISOString(),
-      source: 'Yahoo Finance — ICE Sugar No.11',
-      sourceUrl: `https://finance.yahoo.com/quote/${encodeURIComponent(SYMBOL)}/`,
-      symbol: SYMBOL,
-      currency: meta.currency ?? 'USX',
-      exchange: meta.fullExchangeName ?? 'ICE Futures',
+      source: meta.source,
+      sourceUrl: meta.sourceUrl,
+      symbol: meta.symbol,
+      currency: chartMeta.currency ?? 'USX',
+      exchange: chartMeta.fullExchangeName ?? 'ICE Futures',
       range: mode,
-      rangeLabel: label,
+      rangeLabel: meta.rangeLabel ?? label,
       granularity,
       intervalMinutes: interval,
       bars: points.length,
@@ -293,6 +356,9 @@ export async function GET(req: Request) {
       points,
       trend,
       stale: false,
+      ...(meta.contract ? { contract: meta.contract } : {}),
+      ...(meta.rollHint ? { rollHint: meta.rollHint } : {}),
+      ...(meta.snapshotFetchedAt ? { snapshotFetchedAt: meta.snapshotFetchedAt } : {}),
     };
 
     cache.set(key, { at: Date.now(), body });
@@ -300,23 +366,61 @@ export async function GET(req: Request) {
       const oldest = [...cache.entries()].sort((a, b) => a[1].at - b[1].at)[0];
       if (oldest) cache.delete(oldest[0]);
     }
-    return NextResponse.json(body);
+    return body;
   } catch (e) {
     const fresh = cache.get(key);
     if (fresh && Date.now() - fresh.at < STALE_MAX) {
-      return NextResponse.json({ ...(fresh.body as object), stale: true, error: e instanceof Error ? e.message : 'fetch failed' });
+      return { ...(fresh.body as object), stale: true, error: e instanceof Error ? e.message : 'fetch failed' };
     }
-    return NextResponse.json({
+    return {
       updatedAt: new Date().toISOString(),
-      source: 'Yahoo Finance — ICE Sugar No.11',
-      symbol: SYMBOL,
+      source: meta.source,
+      sourceUrl: meta.sourceUrl,
+      symbol: meta.symbol,
       range: mode,
-      rangeLabel: label,
+      rangeLabel: meta.rangeLabel ?? label,
       granularity,
       bars: 0,
       points: [],
       trend: null,
       error: e instanceof Error ? e.message : 'fetch failed',
-    }, { status: 200 });
+    };
   }
+}
+
+export async function GET(req: Request) {
+  const p = new URL(req.url).searchParams;
+  const raw = (p.get('range') ?? '1d').toLowerCase();
+  const from = p.get('from');
+  const to = p.get('to');
+  const contract = p.get('contract');
+
+  if (contract && contract !== 'near') {
+    const body = await snapshotSeries(contract, raw, from, to);
+    return NextResponse.json(body, { headers: { 'Cache-Control': 'no-store' } });
+  }
+
+  if (contract === 'near') {
+    const data = await readSnapshot();
+    const priced = (data.contracts ?? []).filter((c: any) => c.role !== 'cash' && c.available && Array.isArray(c.history) && c.history.length);
+    const near = resolveNear(priced.map((c: any) => c.symbol));
+    if (!near) {
+      return NextResponse.json(
+        { error: 'No priced delivery month in the snapshot. Run: npm run fetch:contracts', updatedAt: new Date().toISOString(), points: [] },
+        { status: 503 },
+      );
+    }
+    // The Stooq snapshot is the only HONEST source for a specific delivery
+    // month — Yahoo's continuous SB=F is NOT that month (and is currently
+    // slow/failing). The snapshot also answers in ~5 ms instead of seconds.
+    const body = await snapshotSeries(near.symbol, raw, from, to);
+    return NextResponse.json(body, { headers: { 'Cache-Control': 'no-store' } });
+  }
+
+  const body = await yahooSeries(raw, from, to, {
+    symbol: SYMBOL,
+    source: 'Yahoo Finance — ICE Sugar No.11',
+    sourceUrl: `https://finance.yahoo.com/quote/${encodeURIComponent(SYMBOL)}/`,
+  });
+  return NextResponse.json(body);
 }

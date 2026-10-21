@@ -1,12 +1,14 @@
 import { NextResponse } from 'next/server';
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
+import { resolveNear } from '../../../lib/iceCalendar';
+import { cachedWithMeta } from '../../../lib/cache';
 
 export type Contract = {
   symbol: string;
   name: string;
   label: string;
-  role: 'cash' | 'forward';
+  role: 'forward';
   available: boolean;
   last: number | null;
   open: number | null;
@@ -21,14 +23,9 @@ export type Contract = {
   note: string | null;
 };
 
-const CASH_SYMBOL = 'SBY00';
-const FORWARD_SYMBOLS = ['SBH27', 'SBK27'];
-const ALL_SYMBOLS = [CASH_SYMBOL, ...FORWARD_SYMBOLS];
-const YAHOO_CASH = 'SB=F';
+const YAHOO_FRONT = 'SB=F';
 const BARCHART_URL = 'https://www.barchart.com/futures/quotes/SB*0/futures-prices?viewName=main';
-const YAHOO_URL = `https://finance.yahoo.com/quote/${encodeURIComponent(YAHOO_CASH)}/`;
-
-const LABEL: Record<string, string> = { SBY00: 'Cash', SBH27: 'Mar 2027', SBK27: 'May 2027', 'SB=F': 'Cash (front month)' };
+const YAHOO_URL = `https://finance.yahoo.com/quote/${encodeURIComponent(YAHOO_FRONT)}/`;
 
 const num = (v: unknown): number | null => {
   if (v === null || v === undefined || v === '') return null;
@@ -48,53 +45,17 @@ const firstNum = (arr: unknown): number | null => {
 const allNums = (arr: unknown): number[] =>
   Array.isArray(arr) ? arr.map(num).filter((v): v is number => v !== null) : [];
 
-function unavailable(symbol: string, role: Contract['role'], source: string, sourceUrl: string, note: string): Contract {
+function unavailable(symbol: string, label: string, source: string, sourceUrl: string, note: string): Contract {
   return {
     symbol,
-    name: LABEL[symbol] ?? symbol,
-    label: LABEL[symbol] ?? symbol,
-    role,
+    name: label,
+    label,
+    role: 'forward',
     available: false,
     last: null, open: null, high: null, low: null, prevClose: null,
     change: null, changePct: null,
     mode: 'unavailable',
     source, sourceUrl, note,
-  };
-}
-
-async function barchart(symbols: string[]) {
-  const key = process.env.BARCHART_API_KEY;
-  if (!key) return null;
-  const url = `https://ondemand.websol.barchart.com/getQuote.json?apikey=${encodeURIComponent(key)}&symbols=${encodeURIComponent(symbols.join(','))}`;
-  const r = await fetch(url, { cache: 'no-store' });
-  if (!r.ok) throw new Error(`Barchart HTTP ${r.status}`);
-  const j = await r.json();
-  return Array.isArray(j?.results) ? j.results : [];
-}
-
-function fromBarchart(x: any, role: Contract['role']): Contract {
-  const symbol = String(x?.symbol ?? '');
-  const last = num(x?.lastPrice);
-  const prevClose = num(x?.previousClose);
-  const netChange = num(x?.netChange);
-  const change = netChange ?? (last !== null && prevClose !== null ? last - prevClose : null);
-  return {
-    symbol,
-    name: String(x?.name ?? '').replace('Sugar #11 ', '') || LABEL[symbol] || symbol,
-    label: LABEL[symbol] || symbol,
-    role,
-    available: last !== null,
-    last,
-    open: num(x?.open),
-    high: num(x?.high),
-    low: num(x?.low),
-    prevClose,
-    change,
-    changePct: num(x?.percentChange) ?? delta(last, prevClose),
-    mode: String(x?.mode ?? 'delayed').toLowerCase(),
-    source: 'Barchart OnDemand — ICE Sugar No.11',
-    sourceUrl: BARCHART_URL,
-    note: null,
   };
 }
 
@@ -104,6 +65,7 @@ const SNAPSHOT_MAX_AGE_MS = 5 * 24 * 60 * 60 * 1000;
 type SnapshotContract = {
   symbol: string;
   label: string;
+  role?: string;
   available?: boolean;
   last?: number | null;
   open?: number | null;
@@ -130,7 +92,8 @@ let snapshotCache: Snapshot | null = null;
 async function stooqSnapshot(): Promise<Snapshot | null> {
   if (snapshotCache && Date.now() - snapshotCache.at < 30_000) return snapshotCache;
   try {
-    const parsed = JSON.parse(await fs.readFile(SNAPSHOT_FILE, 'utf8'));
+    const { readContractsSnapshot } = await import('../../../lib/contractsStore');
+    const parsed = await readContractsSnapshot<any>();
     const list: SnapshotContract[] = Array.isArray(parsed?.contracts) ? parsed.contracts : [];
     if (!list.length) return null;
     snapshotCache = {
@@ -144,7 +107,7 @@ async function stooqSnapshot(): Promise<Snapshot | null> {
   }
 }
 
-function fromSnapshot(c: SnapshotContract, role: Contract['role'], fetchedAt: string): Contract {
+function fromSnapshot(c: SnapshotContract, fetchedAt: string): Contract {
   const label = c.label || c.symbol;
   const age = fetchedAt ? Date.now() - Date.parse(fetchedAt) : Number.NaN;
   const stale = Number.isFinite(age) && age > SNAPSHOT_MAX_AGE_MS;
@@ -153,7 +116,7 @@ function fromSnapshot(c: SnapshotContract, role: Contract['role'], fetchedAt: st
     symbol: c.symbol,
     name: label,
     label,
-    role,
+    role: 'forward',
     available: last !== null,
     last,
     open: num(c.open),
@@ -169,130 +132,140 @@ function fromSnapshot(c: SnapshotContract, role: Contract['role'], fetchedAt: st
   };
 }
 
-async function yahooCash(): Promise<{ contract: Contract | null; series: number[] }> {
-  const url = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(YAHOO_CASH)}?range=1d&interval=5m`;
-  const r = await fetch(url, { cache: 'no-store' });
+async function yahooFrontData(): Promise<{
+  last: number | null;
+  open: number | null;
+  high: number | null;
+  low: number | null;
+  prevClose: number | null;
+  change: number | null;
+  changePct: number | null;
+} | null> {
+  const url = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(YAHOO_FRONT)}?range=1d&interval=5m`;
+  // Hard 4s ceiling — a hanging Yahoo must not stall the whole dashboard;
+  // the Stooq snapshot fallback is one line below.
+  const r = await fetch(url, { cache: 'no-store', signal: AbortSignal.timeout(4_000) });
   if (!r.ok) throw new Error(`Yahoo HTTP ${r.status}`);
   const result = (await r.json())?.chart?.result?.[0];
-  if (!result) return { contract: null, series: [] };
+  if (!result) return null;
   const meta = result.meta ?? {};
   const q = result.indicators?.quote?.[0] ?? {};
   const closes = (q.close ?? []).filter((v: unknown): v is number => num(v) !== null) as number[];
   const last = num(meta.regularMarketPrice) ?? closes[closes.length - 1] ?? null;
   const prevClose = num(meta.previousClose);
-  if (last === null) return { contract: null, series: closes };
+  if (last === null) return null;
   const highs = allNums(q.high);
   const lows = allNums(q.low);
+  const change = last !== null && prevClose !== null ? last - prevClose : null;
   return {
-    series: closes,
-    contract: {
-      symbol: YAHOO_CASH,
-      name: String(meta.shortName ?? 'Sugar No.11').replace('Sugar #11 ', '') || 'Cash (front month)',
-      label: LABEL[YAHOO_CASH],
-      role: 'cash',
-      available: true,
-      last,
-      open: firstNum(q.open) ?? highs[0] ?? null,
-      high: highs.length ? Math.max(...highs) : null,
-      low: lows.length ? Math.min(...lows) : null,
-      prevClose,
-      change: last !== null && prevClose !== null ? last - prevClose : null,
-      changePct: delta(last, prevClose),
-      mode: 'delayed',
-      source: 'Yahoo Finance — ICE Sugar No.11 front month',
-      sourceUrl: YAHOO_URL,
-      note: null,
-    },
+    last,
+    open: firstNum(q.open) ?? highs[0] ?? null,
+    high: highs.length ? Math.max(...highs) : null,
+    low: lows.length ? Math.min(...lows) : null,
+    prevClose,
+    change,
+    changePct: delta(last, prevClose),
   };
 }
 
-export async function GET() {
+async function buildMarket() {
   const now = new Date().toISOString();
-  const key = process.env.BARCHART_API_KEY;
-  const providers = { barchart: Boolean(key), stooq: false, yahoo: false };
+  const providers = { barchart: false, stooq: false, yahoo: false };
 
-  const by = new Map<string, Contract>();
-  let barchartError: string | null = null;
-
-  // 1) Barchart OnDemand (authoritative, needs key)
-  if (key) {
-    try {
-      const rows = await barchart(ALL_SYMBOLS);
-      for (const x of (rows ?? []) as any[]) {
-        const s = String(x?.symbol ?? '').toUpperCase();
-        if (ALL_SYMBOLS.includes(s)) by.set(s, fromBarchart(x, s === CASH_SYMBOL ? 'cash' : 'forward'));
-      }
-    } catch (e) {
-      barchartError = e instanceof Error ? e.message : 'Barchart request failed';
-    }
-  }
-
-  // 2) Yahoo front month — authoritative and live for the cash contract.
-  //    (Stooq's sb.f composite is deliberately not used for cash: it has rolled
-  //    to Mar-2027 and would silently duplicate the Mar card.)
-  if (!by.get(CASH_SYMBOL)?.available) {
-    try {
-      const { contract } = await yahooCash();
-      if (contract) {
-        providers.yahoo = true;
-        by.set(CASH_SYMBOL, contract);
-      }
-    } catch {
-      /* cash falls through to the snapshot */
-    }
-  }
-
-  // 3) Stooq snapshot for the individual ICE forwards (Mar / May 2027)
   const snapshot = await stooqSnapshot();
-  for (const s of ALL_SYMBOLS) {
-    if (by.get(s)?.available) continue;
-    const sc = snapshot?.by.get(s);
+  const pricedSymbols: string[] = [];
+  if (snapshot?.by) {
+    for (const [sym, sc] of snapshot.by) {
+      if (sc.role !== 'cash' && num(sc.last) !== null) pricedSymbols.push(sym);
+    }
+  }
+
+  const nearRef = resolveNear(pricedSymbols);
+  if (!nearRef) {
+    return {
+      updatedAt: now,
+      source: 'No data',
+      mode: 'unavailable',
+      providers,
+      note: 'No priced delivery month found in snapshot. Run: npm run fetch:contracts',
+      snapshotFetchedAt: snapshot?.fetchedAt ?? null,
+      contracts: [unavailable('SBH27', 'Mar 2027', 'none', BARCHART_URL, 'Run npm run fetch:contracts')],
+      spreads: [],
+      coverage: { total: 1, priced: 0 },
+    };
+  }
+
+  const nearSymbol = nearRef.symbol;
+  const nearLabel = nearRef.labelEn;
+
+  let contract: Contract | null = null;
+
+  // 1) Live front-month from Yahoo — maps to the current contract
+  try {
+    const d = await yahooFrontData();
+    if (d) {
+      providers.yahoo = true;
+      contract = {
+        symbol: nearSymbol,
+        name: nearLabel,
+        label: nearLabel,
+        role: 'forward',
+        available: true,
+        ...d,
+        mode: 'delayed',
+        source: 'Yahoo Finance — ICE Sugar No.11 front month (SB=F)',
+        sourceUrl: YAHOO_URL,
+        note: `السعر من المؤشر المستمر SB=F (العقد الأمامي) ويعكس ${nearLabel} تقريباً — ليس تسعير ICE الرسمي لهذا الشهر. للتفصيل الرسمي: Barchart/ICE.`,
+      };
+    }
+  } catch {
+    /* fall through to snapshot */
+  }
+
+  // 2) Fallback to Stooq snapshot for the exact month
+  if (!contract) {
+    const sc = snapshot?.by.get(nearSymbol);
     if (sc && num(sc.last) !== null) {
-      by.set(s, fromSnapshot(sc, s === CASH_SYMBOL ? 'cash' : 'forward', snapshot?.fetchedAt ?? ''));
+      contract = fromSnapshot(sc, snapshot?.fetchedAt ?? '');
       providers.stooq = true;
     }
   }
 
-  const fallbackNote = key
-    ? `Barchart key present but quote missing (${barchartError ?? 'no result'}).`
-    : 'Run `npm run fetch:contracts` to refresh the Stooq snapshot.';
+  if (!contract) {
+    return {
+      updatedAt: now,
+      source: 'No live feed',
+      mode: 'unavailable',
+      providers,
+      note: 'Run `npm run fetch:contracts` to refresh the snapshot.',
+      snapshotFetchedAt: snapshot?.fetchedAt ?? null,
+      contracts: [unavailable(nearSymbol, nearLabel, 'none', BARCHART_URL, 'No price available')],
+      spreads: [],
+      coverage: { total: 1, priced: 0 },
+    };
+  }
 
-  const contracts = ALL_SYMBOLS.map((s) => {
-    const c = by.get(s);
-    if (c?.available) return c;
-    return unavailable(s, s === CASH_SYMBOL ? 'cash' : 'forward', 'none', BARCHART_URL, fallbackNote);
-  });
-
-  const spreads = contracts.length >= 3
-    ? [1, 2].flatMap((i) => {
-        const prev = contracts[i - 1].last;
-        const cur = contracts[i].last;
-        if (prev === null || cur === null) return [];
-        return [{
-          from: contracts[i - 1].label,
-          to: contracts[i].label,
-          value: cur - prev,
-          pct: delta(cur, prev),
-        }];
-      })
-    : [];
-
-  const priced = contracts.filter((c) => c.available).length;
-  const active = [
-    contracts.some((c) => c.source.includes('Barchart')) ? 'Barchart OnDemand' : null,
-    providers.stooq ? 'Stooq snapshot' : null,
-    providers.yahoo ? 'Yahoo Finance' : null,
-  ].filter(Boolean) as string[];
-
-  return NextResponse.json({
+  return {
     updatedAt: now,
-    source: active.length ? active.join(' + ') : 'No live feed',
-    mode: contracts[0]?.mode ?? 'unavailable',
+    source: contract.source,
+    mode: contract.mode,
     providers,
-    note: barchartError,
+    note: null,
     snapshotFetchedAt: snapshot?.fetchedAt ?? null,
-    contracts,
-    spreads,
-    coverage: { total: contracts.length, priced },
+    contracts: [contract],
+    spreads: [],
+    coverage: { total: 1, priced: 1 },
+  };
+}
+
+export async function GET() {
+  // The dashboard and the assistant both poll this every minute; one shared 30s
+  // cache means Yahoo is hit at most twice a minute regardless of open clients.
+  const { value, cached, at, stale } = await cachedWithMeta('market', 30_000, buildMarket, {
+    staleMaxMs: 30 * 60_000,
   });
+  return NextResponse.json(
+    { ...value, cached, fetchedAt: new Date(at).toISOString(), stale },
+    { headers: { 'Cache-Control': 'no-store' } },
+  );
 }

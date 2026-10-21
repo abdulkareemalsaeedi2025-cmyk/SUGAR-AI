@@ -1,5 +1,8 @@
-'use client';
+﻿'use client';
 import { useEffect, useId, useMemo, useRef, useState } from 'react';
+import { useContract } from './ContractContext';
+import { useLang } from './LangContext';
+import { pick } from '../../lib/i18n';
 
 type Point = { t: number; c: number; o?: number | null; h?: number | null; l?: number | null };
 type ChartType = 'area' | 'line' | 'candles' | 'bars';
@@ -41,7 +44,6 @@ type Series = {
 };
 
 const REFRESH_MS = 30000;
-const W = 760;
 const H = 240;
 const PAD = { top: 16, right: 54, bottom: 26, left: 10 };
 
@@ -64,7 +66,12 @@ const CHART_TYPES: { key: ChartType; label: string }[] = [
 const iso = (d: Date) => d.toISOString().slice(0, 10);
 const fmt = (v: number | null | undefined, d = 2) => (v == null ? '—' : v.toFixed(d));
 
-export default function CashChart() {
+export default function CashChart({ compact = false }: { compact?: boolean }) {
+  const { lang } = useLang();
+  // Narrower geometry in compact mode so axis labels stay readable when the
+  // chart lives inside a 4-column grid cell instead of a full-width row.
+  const W = compact ? 430 : 760;
+  const padR = compact ? 44 : PAD.right;
   const [data, setData] = useState<Series | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const [period, setPeriod] = useState('1d');
@@ -77,6 +84,7 @@ export default function CashChart() {
   const [hover, setHover] = useState<number | null>(null);
   const uid = useId().replace(/:/g, '');
   const abort = useRef<AbortController | null>(null);
+  const { nyChoice } = useContract();
 
   // Ticks every second so the panel visibly proves it is refreshing on its own.
   const [now, setNow] = useState(() => Date.now());
@@ -100,8 +108,9 @@ export default function CashChart() {
       abort.current = ctl;
       try {
         const span = period === 'custom' ? `range=custom&from=${from}&to=${to}` : `range=${period}`;
-        // "near" = nearest upcoming ICE delivery month (auto-rolls). "front" = Yahoo continuous SB=F.
-        const qs = feed === 'near' ? `${span}&contract=near` : span;
+        // "near" = selected (or nearest) ICE delivery month. "front" = Yahoo continuous SB=F.
+        const target = nyChoice ? encodeURIComponent(nyChoice) : 'near';
+        const qs = feed === 'near' ? `${span}&contract=${target}` : span;
         setPending(true);
         const r = await fetch(`/api/series?${qs}`, { cache: 'no-store', signal: ctl.signal });
         const j = (await r.json()) as Series;
@@ -117,7 +126,7 @@ export default function CashChart() {
     pull();
     const id = setInterval(pull, REFRESH_MS);
     return () => { alive = false; clearInterval(id); abort.current?.abort(); };
-  }, [period, from, to, feed]);
+  }, [period, from, to, feed, nyChoice]);
 
   const gran: Granularity = data?.granularity ?? 'intraday';
 
@@ -144,7 +153,7 @@ export default function CashChart() {
 
     const n = pts.length;
     const total = n - 1 + horizon;
-    const iw = W - PAD.left - PAD.right;
+    const iw = W - PAD.left - padR;
     const ih = H - PAD.top - PAD.bottom;
 
     const X = (i: number) => PAD.left + (total === 0 ? 0 : (i / total) * iw);
@@ -205,51 +214,58 @@ export default function CashChart() {
     };
 
     return { X, Y, line, area, proj, bandPath: bandTop && bandBot ? `M${bandTop}L${bandBot}Z` : '', lastIdx, ticks, label, lo, hi, prevY: prevClose != null ? Y(prevClose) : null, lastY: Y(pts[lastIdx].c), lastX: X(lastIdx), n, pts, total, ih, bodyW, candles, hasOhlc, idxAt, baseY: PAD.top + ih };
-  }, [data, gran]);
+  }, [data, gran, W, padR]);
 
   const positive = (data?.change ?? 0) >= 0;
   const stroke = positive ? '#5bd48a' : '#f2777a';
   const head = PERIODS.find((p) => p.key === period);
-  const granWord = gran === 'intraday' ? `${data?.intervalMinutes ?? '5m'} min bars` : gran === 'hourly' ? 'hourly bars' : 'daily bars';
-  const rangeWord = period === 'custom' ? (data?.rangeLabel ?? `${from} → ${to}`) : (head?.label ?? period);
-  const baseWord = gran === 'intraday' ? 'Prev close' : 'Period open';
+  const granWord =
+    lang === 'ar'
+      ? gran === 'intraday' ? `أعمدة ${data?.intervalMinutes ?? '5m'} دقيقة` : gran === 'hourly' ? 'أعمدة ساعية' : 'أعمدة يومية'
+      : gran === 'intraday' ? `${data?.intervalMinutes ?? '5m'} min bars` : gran === 'hourly' ? 'hourly bars' : 'daily bars';
+  const rangeWord = period === 'custom' ? (data?.rangeLabel ?? `${from} → ${to}`) : (lang === 'ar' ? (head?.ar ?? head?.label ?? period) : (head?.label ?? period));
+  const baseWord = lang === 'ar' ? (gran === 'intraday' ? 'إغلاق سابق' : 'افتتاح المدة') : (gran === 'intraday' ? 'Prev close' : 'Period open');
 
   return (
-    <section className="card chart" dir="ltr">
+    <section className={`card chart${compact ? ' chart--compact' : ''}`} dir="ltr">
       <div className="cardhead">
         <div>
           <span className="kicker">{rangeWord.toUpperCase()} · {granWord.toUpperCase()}</span>
           <h2>
             {feed === 'near' && data?.contract
-              ? `Sugar #11 — ${data.contract.symbol} · ${data.contract.labelEn}`
-              : `Cash Sugar #11 — ${period === 'custom' ? 'custom range' : 'price indicator'}`}
+              ? `Sugar #11 — ${data.contract.symbol} · ${lang === 'ar' ? data.contract.labelAr : data.contract.labelEn}`
+              : lang === 'ar'
+                ? `سكر الكاش #11 — ${period === 'custom' ? 'نطاق مخصص' : 'مؤشر السعر'}`
+                : `Cash Sugar #11 — ${period === 'custom' ? 'custom range' : 'price indicator'}`}
           </h2>
           {feed === 'near' && data?.rollHint && <p className="chart__roll">{data.rollHint}</p>}
         </div>
         <div className="chart__meta">
           <span className={positive ? 'online' : 'offline'}>{data?.bars ? `${data.bars} bars` : 'no data'}</span>
-          <span className="chart__refresh" title="وقت جلب البيانات من المصدر (يتحدث تلقائياً)">
+          <span className="chart__refresh" title={pick(lang, 'وقت جلب البيانات من المصدر (يتحدث تلقائياً)', 'Data fetch time from source (auto-refreshing)')}>
             <i className="chart__tick" />
             <span>
-              {!fetchedOk ? 'جارِ التحميل…' : `آخر جلب ${hhmm}${ageSec != null ? ` · قبل ${ageSec} ث` : ''}`}
+              {!fetchedOk
+                ? pick(lang, 'جارِ التحميل…', 'Loading…')
+                : `${pick(lang, 'آخر جلب', 'Fetched')} ${hhmm}${ageSec != null ? ` · ${pick(lang, `قبل ${ageSec} ث`, `${ageSec}s ago`)}` : ''}`}
               {pending && ' ⟳'}
             </span>
           </span>
-          {data?.stale && <span className="chart__stale">بيانات مخزنة مؤقتاً — إعادة المحاولة جارية</span>}
+          {data?.stale && <span className="chart__stale">{pick(lang, 'بيانات مخزنة مؤقتاً — إعادة المحاولة جارية', 'Cached data — retrying')}</span>}
         </div>
       </div>
 
       <div className="periods">
-        <button type="button" className={feed === 'near' ? 'on' : ''} onClick={() => setFeed('near')} title="أقرب عقد قادم — ينتقل تلقائياً عند الانتهاء">
-          أقرب عقد
+        <button type="button" className={feed === 'near' ? 'on' : ''} onClick={() => setFeed('near')} title={pick(lang, 'أقرب عقد قادم — ينتقل تلقائياً عند الانتهاء', 'Nearest upcoming contract — rolls automatically')}>
+          {pick(lang, 'أقرب عقد', 'Near')}
         </button>
-        <button type="button" className={feed === 'front' ? 'on' : ''} onClick={() => setFeed('front')} title="العقد المستمر من Yahoo">
-          مستمر
+        <button type="button" className={feed === 'front' ? 'on' : ''} onClick={() => setFeed('front')} title={pick(lang, 'العقد المستمر من Yahoo', 'Yahoo continuous contract')}>
+          {pick(lang, 'مستمر', 'Front')}
         </button>
         <span className="periods__sep" />
         {PERIODS.map((p) => (
           <button key={p.key} type="button" className={period === p.key ? 'on' : ''} onClick={() => setPeriod(p.key)}>
-            {p.label}
+            {lang === 'ar' ? p.ar : p.label}
           </button>
         ))}
         <button type="button" className={period === 'custom' ? 'on' : ''} onClick={() => setPeriod('custom')}>
@@ -316,14 +332,14 @@ export default function CashChart() {
 
             {g.ticks.map((t, i) => (
               <g key={i}>
-                <line x1={PAD.left} x2={W - PAD.right} y1={t.y} y2={t.y} stroke="#17304a" strokeWidth="1" />
-                <text x={W - PAD.right + 6} y={t.y + 4} className="axlbl">{t.v.toFixed(2)}</text>
+                <line x1={PAD.left} x2={W - padR} y1={t.y} y2={t.y} stroke="#17304a" strokeWidth="1" />
+                <text x={W - padR + 6} y={t.y + 4} className="axlbl">{t.v.toFixed(2)}</text>
               </g>
             ))}
 
             {g.prevY != null && (
               <g>
-                <line x1={PAD.left} x2={W - PAD.right} y1={g.prevY} y2={g.prevY} stroke="#6b8aa3" strokeWidth="1" strokeDasharray="4 4" />
+                <line x1={PAD.left} x2={W - padR} y1={g.prevY} y2={g.prevY} stroke="#6b8aa3" strokeWidth="1" strokeDasharray="4 4" />
                 <text x={PAD.left + 4} y={g.prevY - 5} className="axlbl">prev {fmt(data?.prevClose)}</text>
               </g>
             )}
@@ -382,7 +398,7 @@ export default function CashChart() {
               const k = g.candles[hover];
               const hx = g.X(hover);
               const hy = g.Y(p.c);
-              const flip = hx > W - PAD.right - 150;
+              const flip = hx > W - padR - 150;
               const bx = flip ? hx - 152 : hx + 10;
               const by = Math.max(PAD.top + 2, Math.min(hy - 44, H - PAD.bottom - 62));
               const rows: [string, string][] = [
@@ -393,7 +409,7 @@ export default function CashChart() {
               return (
                 <g pointerEvents="none">
                   <line x1={hx.toFixed(2)} x2={hx.toFixed(2)} y1={PAD.top} y2={H - PAD.bottom} stroke="#8fb6d6" strokeWidth="1" strokeDasharray="3 3" />
-                  <line x1={PAD.left} x2={W - PAD.right} y1={hy.toFixed(2)} y2={hy.toFixed(2)} stroke="#8fb6d6" strokeWidth="1" strokeDasharray="3 3" />
+                  <line x1={PAD.left} x2={W - padR} y1={hy} y2={hy} stroke="#8fb6d6" strokeWidth="1" strokeDasharray="3 3" />
                   <circle cx={hx.toFixed(2)} cy={hy.toFixed(2)} r="4" fill="#fff" stroke={stroke} strokeWidth="2" />
                   <rect x={bx.toFixed(2)} y={by.toFixed(2)} width="142" height={20 + rows.length * 13} rx="7" fill="#0b1926" stroke="#2b4d68" />
                   <text x={(bx + 8).toFixed(2)} y={(by + 14).toFixed(2)} className="axlbl">

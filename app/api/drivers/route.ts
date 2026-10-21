@@ -1,5 +1,6 @@
 import { NextResponse } from 'next/server';
 import { primaryTopic } from '../../../lib/sugarTopics';
+import { withArabicTitles } from '../../../lib/newsI18n';
 
 export const dynamic = 'force-dynamic';
 export const runtime = 'nodejs';
@@ -22,6 +23,12 @@ let refreshing: Promise<Cache> | null = null;
 
 async function readDisk(): Promise<Cache | null> {
   try {
+    const { CLOUD_MODE, kvGet } = await import('../../../lib/db');
+    if (CLOUD_MODE) {
+      const j = await kvGet<{ at: number; macro: unknown[]; news: unknown[]; weather: unknown }>('drivers-cache');
+      if (!j || typeof j.at !== 'number' || !Array.isArray(j.news)) return null;
+      return { at: j.at, macro: j.macro ?? [], news: j.news, weather: j.weather ?? [] };
+    }
     const { promises: fs } = await import('node:fs');
     const path = await import('node:path');
     const raw = await fs.readFile(path.join(process.cwd(), 'data', CACHE_FILE), 'utf8');
@@ -35,6 +42,11 @@ async function readDisk(): Promise<Cache | null> {
 
 async function writeDisk(c: Cache) {
   try {
+    const { CLOUD_MODE, kvSet } = await import('../../../lib/db');
+    if (CLOUD_MODE) {
+      await kvSet('drivers-cache', c);
+      return;
+    }
     const { promises: fs } = await import('node:fs');
     const path = await import('node:path');
     const file = path.join(process.cwd(), 'data', CACHE_FILE);
@@ -338,6 +350,10 @@ export async function GET() {
     /* no uploads yet */
   }
 
+  // Attach Arabic translations (translate-once-then-cache; never blocks long
+  // — untranslated titles simply arrive on the next poll).
+  const news = await withArabicTitles(data.news as { title: string }[], 12);
+
   return NextResponse.json(
     {
       updatedAt: new Date().toISOString(),
@@ -345,7 +361,7 @@ export async function GET() {
       cached: Boolean(fresh),
       refreshing: !fresh,
       macro: data.macro,
-      news: data.news,
+      news,
       weather: data.weather,
       uploads,
       counts: {

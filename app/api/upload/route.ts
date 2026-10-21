@@ -2,6 +2,7 @@ import { NextResponse } from 'next/server';
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import { classify } from '../../../lib/sugarTopics';
+import { requireAdmin, unauthorized, forbidden, sessionFromRequest } from '../../../lib/auth';
 
 export const dynamic = 'force-dynamic';
 export const runtime = 'nodejs';
@@ -61,6 +62,7 @@ if (name.endsWith('.pdf') || buf.subarray(0, 4).toString() === '%PDF') {
 }
 
 export async function POST(req: Request) {
+  if (!(await requireAdmin(req))) return (await sessionFromRequest(req)) ? forbidden() : unauthorized();
   if (process.env.NEXT_PUBLIC_UPLOAD_ENABLED !== '1') {
     return NextResponse.json(
       { error: 'Uploads are temporarily disabled: this deployment has no persistent disk.' },

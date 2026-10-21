@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server';
 import { buildRecommendation, linreg, type Inputs } from '../../../lib/recommend';
 import { resolveNear } from '../../../lib/iceCalendar';
+import { cachedWithMeta } from '../../../lib/cache';
 
 export const dynamic = 'force-dynamic';
 export const runtime = 'nodejs';
@@ -71,24 +72,28 @@ async function cashQuote(): Promise<{ last: number; previousClose: number | null
 }
 
 const TTL_MS = 3 * 60 * 1000;
-let cached: { at: number; body: unknown } | null = null;
 
 /**
  * Purchase decision support.
  *
  * Reads the same snapshot that prices the dashboard cards, so the call can never
  * contradict the numbers on screen. Deliberately avoids calling our own API
- * routes: a self-fetch would recurse through the cold-start caches.
+ * routes: a self-fetch would recurse through the cold-start caches. The result
+ * is held by the unified cache (memory + SQLite) so a restart stays warm.
  */
 export async function GET() {
   // Yahoo degrades to 6s timeouts, so without this the top card would sit on
   // "جارِ احتساب المقترح" for 10s+ on every visit.
-  if (cached && Date.now() - cached.at < TTL_MS) {
-    return NextResponse.json(cached.body, { headers: { 'Cache-Control': 'no-store', 'X-Rec-Cache': 'hit' } });
-  }
-  const body = await compute();
-  cached = { at: Date.now(), body };
-  return NextResponse.json(body, { headers: { 'Cache-Control': 'no-store', 'X-Rec-Cache': 'miss' } });
+  const { value, cached, stale } = await cachedWithMeta('recommend', TTL_MS, compute, {
+    staleMaxMs: 30 * 60 * 1000,
+  });
+  return NextResponse.json(value, {
+    headers: {
+      'Cache-Control': 'no-store',
+      'X-Rec-Cache': cached ? 'hit' : 'miss',
+      ...(stale ? { 'X-Rec-Stale': '1' } : {}),
+    },
+  });
 }
 
 async function compute() {
