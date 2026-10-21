@@ -12,9 +12,9 @@
  *   report_files – uploaded report binaries (BYTEA/BLOB) — cloud mode only;
  *                  local mode keeps them on disk under data/daily-reports.
  */
-import { DatabaseSync } from 'node:sqlite';
 import { mkdirSync } from 'node:fs';
 import path from 'node:path';
+import type { DatabaseSync } from 'node:sqlite';
 import type postgres from 'postgres';
 
 export type DbStatus = {
@@ -29,7 +29,7 @@ export type DbStatus = {
 type PgClient = ReturnType<typeof postgres>;
 
 type GlobalDb = typeof globalThis & {
-  __sugarDb?: DatabaseSync | null;
+  __sugarDb?: InstanceType<typeof DatabaseSync> | null;
   __sugarPg?: PgClient | null;
   __sugarDbStatus?: DbStatus;
   __sugarBoot?: Promise<void>;
@@ -118,13 +118,17 @@ async function bootPg(): Promise<PgClient | null> {
   }
 }
 
-function bootSqlite(): DatabaseSync | null {
+async function bootSqlite(): Promise<InstanceType<typeof DatabaseSync> | null> {
   if (g.__sugarDb !== undefined) return g.__sugarDb;
+  // Lazy import: node:sqlite is only needed in local mode. On hosts running
+  // Node 22 (where the module still needs a flag) the cloud path never
+  // touches it, so the app boots fine on any platform.
+  const { DatabaseSync: DbCtor } = await import('node:sqlite');
   const custom = process.env.SMART_SUGAR_DB;
   const file = custom || path.join(process.cwd(), 'data', 'smart-sugar.db');
   const persistent = file !== ':memory:';
-  const tryOpen = (target: string): DatabaseSync => {
-    const db = new DatabaseSync(target, { timeout: 4000 });
+  const tryOpen = (target: string): InstanceType<typeof DatabaseSync> => {
+    const db = new DbCtor(target, { timeout: 4000 });
     db.exec(SQLITE_SCHEMA);
     return db;
   };
@@ -153,13 +157,13 @@ function bootSqlite(): DatabaseSync | null {
 }
 
 /** Resolve the active backend once (Postgres when configured, else SQLite). */
-async function backend(): Promise<{ pg: PgClient | null; lite: DatabaseSync | null }> {
+async function backend(): Promise<{ pg: PgClient | null; lite: InstanceType<typeof DatabaseSync> | null }> {
   if (CLOUD_MODE) {
     const pg = await bootPg();
     if (pg) return { pg, lite: null };
     // fall through to SQLite so the app stays alive if the URL is wrong
   }
-  return { pg: null, lite: bootSqlite() };
+  return { pg: null, lite: await bootSqlite() };
 }
 
 export async function dbStatus(): Promise<DbStatus> {

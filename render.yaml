@@ -13,6 +13,8 @@ services:
     envVars:
       - key: NODE_ENV
         value: production
+      - key: NODE_VERSION
+        value: "24"
       - key: DATABASE_URL
         sync: false          # Supabase session-pooler connection string
       - key: AUTH_SECRET
