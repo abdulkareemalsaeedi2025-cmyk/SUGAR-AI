@@ -1,7 +1,18 @@
 # Smart Sugar AI — Executive Sugar Market & Procurement Intelligence Platform
 
 لوحة تحكم تنفيذية عربية (RTL) لسوق السكر والمشتريات مع مساعد ذكي داخلي.
-Next.js 15 + TypeScript + SQLite (node:sqlite) — إنتاج على `http://localhost:3003`.
+Next.js 15 + TypeScript + SQLite (node:sqlite) محلياً / **Supabase Postgres سحابياً** — إنتاج محلي على `http://localhost:3003` وسحابي على Render.
+
+## ☁️ الوضع السحابي (Render + Supabase)
+
+- عند وجود `DATABASE_URL` (أو `SUPABASE_DB_URL`) → **كل البيانات في Postgres** (kv/audit_log/report_files)؛ وإلا SQLite محلي. طبقة موحدة async في `lib/db.ts` (postgres.js).
+- **الدخول والصلاحيات**: `lib/auth.ts` — مدير (كل الصلاحيات) + مشاهدون (استعراض فقط). كوكي HMAC `ssa_sess`. `middleware.ts` يحوّل غير المسجلين لـ `/login`. **كل مسارات التعديل محمية بـ requireAdmin** (inventory/vessels/pricing/reports/upload/upload). المشاهد: GET فقط (403 على الكتابة) والواجهة تخفي أزراره.
+- المستخدمون في kv `auth:users`. المدير الأول من `ADMIN_USERNAME`/`ADMIN_PASSWORD` (افتراضياً admin/Sugar@2026 — تُغيّر فوراً). لوحة المستخدمين في شارة الرأس (للمدير).
+- `/api/refresh`: مدير أو `?token=<REFRESH_TOKEN>` (للكرون) — النداءات الداخلية تحمل `x-refresh-token`.
+- **لقطة العقود سحابياً**: Stooq يحجب الخوادم → السكربت المحلي `fetch-contracts.mjs` **يدفع اللقطة إلى Supabase** تلقائياً عند وجود DATABASE_URL (أبقِ الجدولة اليومية). القراءة عبر `lib/contractsStore.ts` (kv أولاً ثم الملف).
+- **ملفات التقارير سحابياً**: الثنائيات في جدول `report_files` والميتا في kv (`reports-meta`/`reports-updates`).
+- الترحيل: `npm run migrate:cloud` (يداًوي، قابل لإعادة التشغيل) · دليل النشر الكامل: `DEPLOY.md`.
+- كوكي الجلسة Secure فقط عند https (x-forwarded-proto) — يعمل محلياً http بدون `AUTH_INSECURE_COOKIE=1`.
 
 ## تشغيل الإنتاج (دائماً بعد أي تعديل)
 
@@ -75,6 +86,9 @@ ICE, Barchart, Reuters, Bloomberg, S&P Global, Kingsman, Green Markets, Czarniko
 - الترجمة تنفذ في `lib/newsI18n.ts` وتُستدعى من `app/api/drivers/route.ts`.
 
 ## خريطة الملفات الحرجة
+- `lib/db.ts` طبقة بيانات async ثنائية (SQLite محلي / Postgres سحابي) · `lib/auth.ts` دخول وصلاحيات · `middleware.ts` بوابة الدخول
 - `lib/sugarSheet.ts` محلل تقرير SUGAR POSITION · `lib/reportApply.ts` تطبيق التغذية · `lib/procurement.ts` محرك المشتريات
 - `app/api/reports/upload` استقبال+تصنيف+تغذية · `app/api/inventory` (+position) · `app/api/procurement` · `app/api/london` (اشتقاق لندن)
+- `app/api/auth/*` دخول/خروج/جلسة/مستخدمون · `app/login` صفحة الدخول · `AuthContext`+`UserBadge` الصلاحيات في الواجهة
+- `lib/contractsStore.ts` لقطة العقود (kv/ملف) · `scripts/migrate-to-supabase.mjs` الترحيل · `DEPLOY.md` دليل النشر
 - `VesselPricingTable` جدول تسعير البواخر · `RecommendationCard` مقترح الشراء · `NextContractCard` مايو+السبريد · `ReportsDaily` حقل الرفع المصغّر
