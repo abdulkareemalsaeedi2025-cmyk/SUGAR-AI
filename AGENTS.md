@@ -5,6 +5,7 @@ Next.js 15 + TypeScript + SQLite (node:sqlite) محلياً / **Supabase Postgre
 
 ## ☁️ الوضع السحابي (Render + Supabase)
 
+- **الوصول العام الحالي (الإنتاج):** نفق **Tailscale Funnel** — `https://desktop-d33871i.tail545dca.ts.net` ← `localhost:3003`. الرابط ثابت دائم + HTTPS تلقائي. التفعيل: `tailscale funnel --bg localhost:3003` (مُجدول عبر `scripts/start-server.ps1` في مجلد بدء التشغيل — يعمل عند تسجيل الدخول). يتطلب الكمبيوتر شغالاً كخادم مخفي.
 - عند وجود `DATABASE_URL` (أو `SUPABASE_DB_URL`) → **كل البيانات في Postgres** (kv/audit_log/report_files)؛ وإلا SQLite محلي. طبقة موحدة async في `lib/db.ts` (postgres.js).
 - **الدخول والصلاحيات**: `lib/auth.ts` — مدير (كل الصلاحيات) + مشاهدون (استعراض فقط). كوكي HMAC `ssa_sess`. `middleware.ts` يحوّل غير المسجلين لـ `/login`. **كل مسارات التعديل محمية بـ requireAdmin** (inventory/vessels/pricing/reports/upload/upload). المشاهد: GET فقط (403 على الكتابة) والواجهة تخفي أزراره.
 - المستخدمون في kv `auth:users`. المدير الأول من `ADMIN_USERNAME`/`ADMIN_PASSWORD` (افتراضياً admin/Sugar@2026 — تُغيّر فوراً). لوحة المستخدمين في شارة الرأس (للمدير).
