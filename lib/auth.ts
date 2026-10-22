@@ -112,6 +112,19 @@ export async function deleteUser(id: string, actor: string): Promise<{ ok: boole
   return { ok: true };
 }
 
+/** Change the caller's own password (current password required). */
+export async function changePassword(uid: string, current: string, next: string, actor: string): Promise<{ ok: boolean; error?: string }> {
+  if (next.length < 6) return { ok: false, error: 'weak_password' };
+  const users = await listUsers();
+  const u = users.find((x) => x.id === uid);
+  if (!u) return { ok: false, error: 'not_found' };
+  if (!verifyPassword(current, u.passHash)) return { ok: false, error: 'bad_credentials' };
+  u.passHash = hashPassword(next);
+  await kvSet(USERS_KEY, users);
+  await logAudit({ action: 'auth.change_password', actor, entity: 'auth', entityId: uid });
+  return { ok: true };
+}
+
 /* ------------------------------------------------------------- session tokens */
 
 export async function signSession(s: Session): Promise<string> {

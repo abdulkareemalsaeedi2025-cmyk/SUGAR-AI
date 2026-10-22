@@ -20,6 +20,10 @@ export default function UserBadge() {
   const [np, setNp] = useState('');
   const [msg, setMsg] = useState('');
   const [busy, setBusy] = useState(false);
+  const [curPw, setCurPw] = useState('');
+  const [newPw, setNewPw] = useState('');
+  const [pwMsg, setPwMsg] = useState('');
+  const [pwBusy, setPwBusy] = useState(false);
   const panelRef = useRef<HTMLDivElement | null>(null);
 
   const ar = lang === 'ar';
@@ -85,6 +89,33 @@ export default function UserBadge() {
     }
   }
 
+  async function changePw(e: React.FormEvent) {
+    e.preventDefault();
+    setPwBusy(true);
+    setPwMsg('');
+    try {
+      const r = await fetch('/api/auth/password', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ currentPassword: curPw, newPassword: newPw }),
+      });
+      const j = await r.json();
+      if (j.ok) {
+        setCurPw('');
+        setNewPw('');
+        setPwMsg(ar ? '✓ تم تغيير كلمة المرور' : '✓ Password changed');
+      } else {
+        setPwMsg(
+          j.error === 'bad_credentials' ? (ar ? 'كلمة المرور الحالية غير صحيحة' : 'Current password is wrong')
+          : j.error === 'weak_password' ? (ar ? 'الجديدة أقل من 6 أحرف' : 'New password too short (min 6)')
+          : (ar ? 'فشل' : 'Failed'),
+        );
+      }
+    } finally {
+      setPwBusy(false);
+    }
+  }
+
   if (!user) return null;
 
   return (
@@ -92,7 +123,7 @@ export default function UserBadge() {
       <button
         type="button"
         className="user-badge__main"
-        onClick={() => isAdmin && setOpen((o) => !o)}
+        onClick={() => setOpen((o) => !o)}
         title={isAdmin ? (ar ? 'كل الصلاحيات — إدارة المستخدمين' : 'Full access — manage users') : (ar ? 'استعراض فقط' : 'View only')}
       >
         <span className={`role-dot ${isAdmin ? 'role-dot--admin' : 'role-dot--viewer'}`} />
@@ -103,28 +134,40 @@ export default function UserBadge() {
         {ar ? 'خروج' : 'Sign out'}
       </button>
 
-      {open && isAdmin && (
+      {open && (
         <div className="users-panel" dir={ar ? 'rtl' : 'ltr'}>
-          <h3>{ar ? 'المستخدمون' : 'Users'}</h3>
-          <ul>
-            {users.map((u) => (
-              <li key={u.id}>
-                <span className={`role-dot ${u.role === 'admin' ? 'role-dot--admin' : 'role-dot--viewer'}`} />
-                {u.username}
-                <em>{u.role === 'admin' ? (ar ? 'مدير' : 'admin') : (ar ? 'مشاهد' : 'viewer')}</em>
-                {u.username !== user && (
-                  <button type="button" className="users-panel__del" disabled={busy} onClick={() => removeUser(u.id)} title={ar ? 'حذف' : 'Delete'}>×</button>
-                )}
-              </li>
-            ))}
-          </ul>
-          <form onSubmit={addUser}>
-            <input value={nu} onChange={(e) => setNu(e.target.value)} placeholder={ar ? 'اسم مستخدم جديد' : 'New username'} required />
-            <input value={np} onChange={(e) => setNp(e.target.value)} placeholder={ar ? 'كلمة مرور' : 'Password'} type="password" required />
-            <button type="submit" disabled={busy}>{ar ? '+ مشاهد' : '+ Viewer'}</button>
+          <h3>{ar ? 'تغيير كلمة المرور' : 'Change password'}</h3>
+          <form onSubmit={changePw} style={{ flexDirection: 'column', display: 'flex', gap: 6 }}>
+            <input value={curPw} onChange={(e) => setCurPw(e.target.value)} placeholder={ar ? 'كلمة المرور الحالية' : 'Current password'} type="password" required />
+            <input value={newPw} onChange={(e) => setNewPw(e.target.value)} placeholder={ar ? 'الجديدة (6 أحرف فأكثر)' : 'New (min 6 chars)'} type="password" required />
+            <button type="submit" disabled={pwBusy}>{ar ? 'تغيير' : 'Change'}</button>
           </form>
-          {msg && <p className="users-panel__msg">{msg}</p>}
-          <p className="users-panel__hint">{ar ? 'المستخدمون الجدد يحصلون على صلاحية استعراض فقط' : 'New users get view-only access'}</p>
+          {pwMsg && <p className="users-panel__msg">{pwMsg}</p>}
+
+          {isAdmin && (
+            <>
+              <h3 style={{ marginTop: 8 }}>{ar ? 'المستخدمون' : 'Users'}</h3>
+              <ul>
+                {users.map((u) => (
+                  <li key={u.id}>
+                    <span className={`role-dot ${u.role === 'admin' ? 'role-dot--admin' : 'role-dot--viewer'}`} />
+                    {u.username}
+                    <em>{u.role === 'admin' ? (ar ? 'مدير' : 'admin') : (ar ? 'مشاهد' : 'viewer')}</em>
+                    {u.username !== user && (
+                      <button type="button" className="users-panel__del" disabled={busy} onClick={() => removeUser(u.id)} title={ar ? 'حذف' : 'Delete'}>×</button>
+                    )}
+                  </li>
+                ))}
+              </ul>
+              <form onSubmit={addUser}>
+                <input value={nu} onChange={(e) => setNu(e.target.value)} placeholder={ar ? 'اسم مستخدم جديد' : 'New username'} required />
+                <input value={np} onChange={(e) => setNp(e.target.value)} placeholder={ar ? 'كلمة مرور' : 'Password'} type="password" required />
+                <button type="submit" disabled={busy}>{ar ? '+ مشاهد' : '+ Viewer'}</button>
+              </form>
+              {msg && <p className="users-panel__msg">{msg}</p>}
+              <p className="users-panel__hint">{ar ? 'المستخدمون الجدد يحصلون على صلاحية استعراض فقط' : 'New users get view-only access'}</p>
+            </>
+          )}
         </div>
       )}
     </span>
